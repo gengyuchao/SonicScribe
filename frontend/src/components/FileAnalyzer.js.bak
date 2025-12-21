@@ -1,0 +1,605 @@
+export class FileAnalyzer {
+    constructor() {
+        this.currentFile = null;
+        this.abortController = null;
+        this.isTranscribing = false;
+        this.segmentsMap = new Map();
+
+        this.initElements();
+        this.initEvents();
+    }
+
+    // 简化 DOM 查询
+    $(id) {
+        return document.getElementById(id);
+    }
+
+    // === 元素初始化 ===
+    initElements() {
+        // 静态元素
+        this.uploadArea = this.$('uploadArea');
+        this.uploadLoading = this.$('uploadLoading');
+        this.fileInfo = this.$('fileInfo');
+        this.fileNameEl = this.$('fileName');
+        this.fileSizeEl = this.$('fileSize');
+        this.transcribeFileBtn = this.$('transcribeFileBtn');
+        this.progressContainer = this.$('progressContainer');
+        this.progressFill = this.$('progressFill');
+        this.fileTranscript = this.$('fileTranscript');
+
+        // 动态创建缺失的元素
+        this.statusMessage = this.ensureElement('statusMessage', this.createStatusMessageElement.bind(this));
+        this.stopTranscribeBtn = this.ensureElement('stopTranscribeBtn', this.createStopButtonElement.bind(this));
+        this.summaryContainer = this.ensureElement('summaryContainer', this.createSummaryContainerElement.bind(this));
+        this.combinedTranscript = this.ensureElement('combinedTranscript', this.createCombinedTranscriptElement.bind(this));
+    }
+
+    // 通用确保元素存在
+    ensureElement(id, creator) {
+        let el = this.$(id);
+        if (!el) {
+            el = creator();
+            const ref = this.getInsertionRef(id);
+            if (ref && ref.parentNode) {
+                ref.parentNode.insertBefore(el, ref.nextSibling);
+            } else {
+                document.body.appendChild(el);
+            }
+        }
+        return el;
+    }
+
+    getInsertionRef(id) {
+        if (id === 'statusMessage') return this.progressContainer;
+        if (id === 'stopTranscribeBtn') return this.transcribeFileBtn;
+        if (id === 'summaryContainer') return this.fileTranscript;
+        if (id === 'combinedTranscript') return this.summaryContainer;
+        return this.fileTranscript;
+    }
+
+    // === 元素创建函数 ===
+    createStatusMessageElement() {
+        const el = document.createElement('div');
+        el.id = 'statusMessage';
+        el.className = 'status-message';
+        Object.assign(el.style, {
+            margin: '10px 0',
+            padding: '8px 12px',
+            borderRadius: '4px',
+            fontSize: '14px'
+        });
+        return el;
+    }
+
+    createStopButtonElement() {
+        const btn = document.createElement('button');
+        btn.id = 'stopTranscribeBtn';
+        btn.className = 'btn btn-danger';
+        Object.assign(btn.style, {
+            marginLeft: '10px',
+            display: 'none'
+        });
+        btn.innerHTML = '⏹️ 停止处理';
+        return btn;
+    }
+
+    createSummaryContainerElement() {
+        const container = document.createElement('div');
+        container.id = 'summaryContainer';
+        Object.assign(container.style, {
+            marginTop: '15px',
+            display: 'none'
+        });
+        container.innerHTML = `
+            <div class="summary-box" style="background: white; border: 1px solid #e2e8f0; border-radius: 12px; padding: 15px; margin-top: 15px;">
+                <h3 style="margin-top: 0; color: #333; border-bottom: 2px solid #4361ee; padding-bottom: 8px;">处理摘要</h3>
+                <div id="summaryContent" style="display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; margin-top: 10px;"></div>
+            </div>
+        `;
+        return container;
+    }
+
+    createCombinedTranscriptElement() {
+        const container = document.createElement('div');
+        container.id = 'combinedTranscript';
+        Object.assign(container.style, {
+            marginTop: '20px',
+            display: 'none'
+        });
+        container.innerHTML = `
+            <div class="combined-transcript" style="background: white; border: 1px solid #e2e8f0; border-radius: 12px; padding: 15px; margin-top: 15px;">
+                <h3 style="margin-top: 0; color: #333; border-bottom: 2px solid #4361ee; padding-bottom: 8px;">完整转录结果</h3>
+                <div id="combinedContent" class="transcript-content" style="line-height: 1.6; font-size: 1.1rem; min-height: 100px;"></div>
+            </div>
+        `;
+        return container;
+    }
+
+    // === 事件初始化 ===
+    initEvents() {
+        // 点击上传区域
+        this.uploadArea.addEventListener('click', () => {
+            const fileInput = document.createElement('input');
+            fileInput.type = 'file';
+            fileInput.accept = 'audio/*, .wav, .mp3, .m4a, .flac, .ogg';
+            fileInput.onchange = (e) => {
+                this.handleFileSelect(e.target.files[0]);
+                fileInput.remove();
+            };
+            fileInput.click();
+        });
+
+        // 拖拽支持
+        ['dragover', 'dragenter'].forEach(event => {
+            this.uploadArea.addEventListener(event, (e) => {
+                e.preventDefault();
+                this.uploadArea.classList.add('dragover');
+            });
+        });
+
+        this.uploadArea.addEventListener('dragleave', () => {
+            this.uploadArea.classList.remove('dragover');
+        });
+
+        this.uploadArea.addEventListener('drop', (e) => {
+            e.preventDefault();
+            this.uploadArea.classList.remove('dragover');
+            const file = e.dataTransfer.files[0];
+            if (file) this.handleFileSelect(file);
+        });
+
+        // 按钮事件
+        this.transcribeFileBtn.addEventListener('click', () => this.startTranscription());
+        if (this.stopTranscribeBtn) {
+            this.stopTranscribeBtn.addEventListener('click', () => this.stopTranscription());
+        }
+    }
+
+    // === UI 控制辅助方法 ===
+    setVisibility(el, visible) {
+        if (el) el.style.display = visible ? 'block' : 'none';
+    }
+
+    clearPreviousResults() {
+        this.fileTranscript.innerHTML = '文件转录结果将显示在这里...';
+        this.fileTranscript.className = 'transcript-area';
+
+        // 只保留必要的清空
+        ['summaryContent', 'combinedContent'].forEach(id => {
+            const el = this.$(id);
+            if (el) el.innerHTML = '';
+        });
+
+        [this.summaryContainer, this.combinedTranscript].forEach(el => {
+            this.setVisibility(el, false);
+        });
+
+        if (this.progressFill) this.progressFill.style.width = '0%';
+        this.setVisibility(this.progressContainer, false);
+
+        if (this.statusMessage) {
+            this.statusMessage.textContent = '';
+            this.statusMessage.removeAttribute('style');
+        }
+
+        this.segmentsMap.clear();
+    }
+
+    resetUIForNewTranscription() {
+        this.clearPreviousResults();
+        this.setVisibility(this.progressContainer, true);
+        this.fileTranscript.innerHTML = '<div class="loading" style="display: inline-block; margin-right: 8px;"></div> 正在处理文件...';
+        this.fileTranscript.classList.add('processing');
+        this.setVisibility(this.stopTranscribeBtn, true);
+        this.setVisibility(this.summaryContainer, true);
+    }
+
+    finalizeTranscription() {
+        this.isTranscribing = false;
+        this.transcribeFileBtn.disabled = false;
+        this.transcribeFileBtn.innerHTML = '<span>开始转文字</span>';
+        this.setVisibility(this.uploadLoading, false);
+        this.setVisibility(this.stopTranscribeBtn, false);
+        this.fileTranscript.scrollIntoView({ behavior: 'smooth' });
+    }
+
+    // === 业务逻辑方法 ===
+    handleFileSelect(file) {
+        if (!file) return;
+
+        const MAX_FILE_SIZE = 100 * 1024 * 1024; // 100MB
+        if (file.size > MAX_FILE_SIZE) {
+            this.showStatus(`❌ 文件大小超过限制 (最大 100MB)，当前大小: ${this.formatFileSize(file.size)}`, 'error');
+            return;
+        }
+
+        this.currentFile = file;
+        this.displayFileInfo(file);
+        this.transcribeFileBtn.disabled = false;
+        this.clearPreviousResults();
+        this.showStatus(`✅ 已选择文件: ${file.name}`, 'success');
+    }
+
+    displayFileInfo(file) {
+        this.fileNameEl.textContent = file.name;
+        this.fileSizeEl.textContent = this.formatFileSize(file.size);
+        this.setVisibility(this.fileInfo, true);
+    }
+
+    formatFileSize(bytes) {
+        if (bytes === 0) return '0 Bytes';
+        const k = 1024;
+        const sizes = ['Bytes', 'KB', 'MB', 'GB'];
+        const i = Math.floor(Math.log(bytes) / Math.log(k));
+        return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+    }
+
+    showStatus(message, type = 'info') {
+        if (!this.statusMessage) return;
+
+        this.statusMessage.textContent = message;
+
+        const theme = {
+            success: { bg: '#d4edda', color: '#155724', border: '#c3e6cb' },
+            error: { bg: '#f8d7da', color: '#721c24', border: '#f5c6cb' },
+            warning: { bg: '#fff3cd', color: '#856404', border: '#ffeeba' },
+            info: { bg: '#d1ecf1', color: '#0c5460', border: '#bee5eb' }
+        }[type] || theme.info;
+
+        Object.assign(this.statusMessage.style, {
+            backgroundColor: theme.bg,
+            color: theme.color,
+            border: `1px solid ${theme.border}`
+        });
+
+        if (type === 'success' || type === 'info') {
+            setTimeout(() => {
+                if (this.statusMessage && this.statusMessage.textContent === message) {
+                    this.statusMessage.textContent = '';
+                    this.statusMessage.removeAttribute('style');
+                }
+            }, 3000);
+        }
+    }
+
+    updateProgress(percent, message = '') {
+        if (this.progressFill) {
+            this.progressFill.style.width = `${percent}%`;
+        }
+        if (message) {
+            this.showStatus(message, 'info');
+        }
+    }
+
+    addSummaryInfo(summary) {
+        const summaryContent = this.$('summaryContent');
+        if (!summaryContent) return;
+
+        summaryContent.innerHTML = '';
+
+        const summaryItems = [
+            { label: '总时长', value: `${summary.total_duration}s` },
+            { label: '总段数', value: summary.total_segments },
+            { label: '成功段数', value: summary.successful_segments },
+            { label: '失败段数', value: summary.failed_segments }
+        ];
+
+        if (summary.long_segments_count > 0) {
+            summaryItems.push({ label: '长段数量', value: summary.long_segments_count });
+        }
+
+        if (summary.total_processing_time) {
+            summaryItems.push({ label: '总处理时间', value: `${summary.total_processing_time.toFixed(2)}s` });
+        }
+
+        summaryItems.forEach(item => {
+            const itemDiv = document.createElement('div');
+            Object.assign(itemDiv.style, {
+                backgroundColor: '#f8fafc',
+                padding: '10px',
+                borderRadius: '8px',
+                border: '1px solid #e2e8f0'
+            });
+            itemDiv.innerHTML = `
+                <div style="font-size: 0.85em; color: #6b7280; margin-bottom: 4px;">${item.label}</div>
+                <div style="font-weight: bold; font-size: 1.1em; color: #1f2937;">${item.value}</div>
+            `;
+            summaryContent.appendChild(itemDiv);
+        });
+
+        this.setVisibility(this.summaryContainer, true);
+    }
+
+    appendToCombinedTranscript(text, segmentInfo = null) {
+        const combinedContent = this.$('combinedContent');
+        if (!combinedContent || !text?.trim()) return;
+
+        // 计算语音长度
+        let duration = 0;
+        if (segmentInfo && segmentInfo.start_time !== undefined && segmentInfo.end_time !== undefined) {
+            duration = (segmentInfo.end_time - segmentInfo.start_time).toFixed(2);
+        } else if (segmentInfo && segmentInfo.duration) {
+            duration = segmentInfo.duration;
+        }
+
+        let segmentHtml = '';
+        
+        // 长段特殊样式
+        if (segmentInfo && segmentInfo.is_long_segment) {
+            segmentHtml = `
+                <div class="long-segment-container" style="margin: 20px 0; border: 2px solid #f59e0b; border-radius: 12px; overflow: hidden; box-shadow: 0 3px 10px rgba(245, 158, 11, 0.2);">
+                    <div style="background: linear-gradient(to right, #fffbeb 0%, #fef3c7 100%); padding: 14px 18px; display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #fed7aa;">
+                        <div style="display: flex; align-items: center; gap: 10px;">
+                            <span style="background: #f59e0b; color: white; width: 28px; height: 28px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-weight: bold; flex-shrink: 0; font-size: 1.1rem;">🔊</span>
+                            <strong style="color: #854d0e; font-size: 1.15rem; font-weight: 600;">长语音段 #${segmentInfo.segment_index}</strong>
+                        </div>
+                        <span style="background: #fef3c7; color: #854d0e; padding: 4px 12px; border-radius: 20px; font-weight: 600; font-size: 1rem; min-width: 70px; text-align: center;">
+                            ${duration}s
+                        </span>
+                    </div>
+                    <div style="padding: 18px; background: white;">
+                        <div style="line-height: 1.7; font-size: 1.15rem; color: #1f2937; margin-bottom: 10px; font-weight: 500;">${text}</div>
+                        <div style="font-size: 0.88em; color: #854d0e; display: flex; justify-content: space-between; padding-top: 8px; border-top: 1px solid #fef3c7;">
+                            <span style="font-weight: 500;">⏱️ 时间范围: [${segmentInfo.start_time.toFixed(2)}s - ${segmentInfo.end_time.toFixed(2)}s]</span>
+                            ${segmentInfo.confidence ? `<span style="font-weight: 500;">✓ 置信度: ${(segmentInfo.confidence * 100).toFixed(1)}%</span>` : ''}
+                        </div>
+                    </div>
+                </div>
+            `;
+        } 
+        // 普通段落样式，包含语音长度
+        else if (segmentInfo) {
+            segmentHtml = `
+                <div class="transcript-paragraph" style="margin: 16px 0; padding: 14px 18px; border-radius: 10px; background: #f8fafc; border-left: 4px solid #3b82f6; box-shadow: 0 2px 5px rgba(0,0,0,0.03);">
+                    <div style="display: flex; justify-content: space-between; font-size: 0.88em; color: #374151; margin-bottom: 10px; font-weight: 500;">
+                        <span>段 #${segmentInfo.segment_index}</span>
+                        <span style="background: #dbeafe; color: #1e40af; padding: 3px 10px; border-radius: 15px; font-weight: 600;">
+                            ${duration}s
+                        </span>
+                    </div>
+                    <div style="line-height: 1.65; font-size: 1.08rem; color: #1e293b; font-weight: 500;">${text}</div>
+                    <div style="font-size: 0.83em; color: #4b5563; margin-top: 8px; display: flex; justify-content: space-between; padding-top: 6px; border-top: 1px dashed #bfdbfe;">
+                        <span>🕒 [${segmentInfo.start_time.toFixed(2)}s - ${segmentInfo.end_time.toFixed(2)}s]</span>
+                        ${segmentInfo.confidence ? `<span>✓ ${(segmentInfo.confidence * 100).toFixed(1)}%</span>` : ''}
+                    </div>
+                </div>
+            `;
+        } 
+        // 无信息的普通文本
+        else {
+            segmentHtml = `<div style="margin: 16px 0; line-height: 1.65; font-size: 1.08rem;">${text}</div>`;
+        }
+
+        combinedContent.insertAdjacentHTML('beforeend', segmentHtml);
+        combinedContent.scrollTop = combinedContent.scrollHeight;
+        this.setVisibility(this.combinedTranscript, true);
+    }
+
+    // === 转录流程 ===
+    stopTranscription() {
+        if (this.abortController) {
+            this.abortController.abort();
+            this.showStatus('⏹️ 已停止处理', 'warning');
+            if (this.stopTranscribeBtn) this.stopTranscribeBtn.disabled = true;
+        }
+    }
+
+    async startTranscription() {
+        if (!this.currentFile) {
+            this.showStatus('❌ 请先选择一个音频文件', 'error');
+            return;
+        }
+
+        if (this.isTranscribing) {
+            this.showStatus('⚠️ 处理中，请先停止当前任务', 'warning');
+            return;
+        }
+
+        this.isTranscribing = true;
+        this.transcribeFileBtn.disabled = true;
+        this.transcribeFileBtn.innerHTML = '<span class="loading" style="display: inline-block; margin-right: 8px;"></span><span>处理中...</span>';
+        this.setVisibility(this.uploadLoading, true);
+        this.resetUIForNewTranscription();
+
+        try {
+            this.abortController = new AbortController();
+
+            const formData = new FormData();
+            formData.append('file', this.currentFile);
+            formData.append('stream', 'true');
+            formData.append('vad_enabled', 'true');
+
+            const response = await fetch('/transcribe/file', {
+                method: 'POST',
+                body: formData,
+                signal: this.abortController.signal
+            });
+
+            if (!response.ok) {
+                const errorData = await response.json().catch(() => null);
+                throw new Error(errorData?.detail || `HTTP错误: ${response.status}`);
+            }
+
+            const reader = response.body.getReader();
+            const decoder = new TextDecoder('utf-8');
+            let buffer = '';
+
+            while (true) {
+                const { done, value } = await reader.read();
+                if (done) break;
+
+                buffer += decoder.decode(value, { stream: true });
+                const lines = buffer.split('\n');
+                buffer = lines.pop() || '';
+
+                for (const line of lines) {
+                    if (!line.trim()) continue;
+                    try {
+                        const result = JSON.parse(line);
+                        switch (result.type) {
+                            case 'initialization':
+                                this.handleInitialization(result);
+                                break;
+                            case 'segments_summary':
+                                this.handleSegmentsSummary(result);
+                                break;
+                            case 'segment_result':
+                                this.handleSegmentResult(result);
+                                break;
+                            case 'segment_error':
+                                this.handleSegmentError(result);
+                                break;
+                            case 'final_summary':
+                                this.handleFinalSummary(result);
+                                break;
+                            default:
+                                console.warn('未知消息类型:', result.type);
+                        }
+                    } catch (e) {
+                        console.error('解析JSON失败:', e, line);
+                        this.showStatus(`❌ 解析错误: ${e.message}`, 'error');
+                    }
+                }
+            }
+        } catch (error) {
+            console.error('转录失败:', error);
+            if (error.name === 'AbortError') {
+                this.showStatus('⏹️ 处理已停止', 'warning');
+            } else {
+                this.showStatus(`❌ 转录失败: ${error.message}`, 'error');
+                this.fileTranscript.innerHTML = `
+                    <div style="padding: 20px; background: #fef2f2; border: 1px solid #fecaca; border-radius: 8px;">
+                        <h3 style="color: #ef4444; margin-top: 0;">处理失败</h3>
+                        <p style="color: #b91c1c; margin: 10px 0;">${error.message}</p>
+                        <p style="color: #6b7280; font-size: 0.9em;">详细信息: ${error.toString()}</p>
+                    </div>
+                `;
+                this.fileTranscript.classList.remove('processing');
+            }
+        } finally {
+            this.finalizeTranscription();
+        }
+    }
+
+    // === 消息处理 ===
+    handleInitialization(result) {
+        this.fileNameEl.textContent = result.filename;
+        this.fileSizeEl.textContent = this.formatFileSize(result.file_size);
+        this.updateProgress(5, `准备处理 ${result.total_segments} 个语音段...`);
+        this.showStatus(`初始化完成: ${result.filename} (${this.formatFileSize(result.file_size)})`, 'info');
+    }
+
+    handleSegmentsSummary(result) {
+        this.showStatus(`🎯 检测到 ${result.total_segments} 个语音段，开始转录...`, 'info');
+        this.updateProgress(10, `开始处理 ${result.total_segments} 个段`);
+    }
+
+    handleSegmentResult(result) {
+        // 不再更新段详情，只更新进度和完整转录
+        this.updateProgress(result.progress, `处理中: 段 #${result.segment_index}/${result.total_segments}`);
+        this.showStatus(
+            `✅ 段 #${result.segment_index}: ${result.text?.slice(0, 30)}${(result.text?.length > 30) ? '...' : ''}`,
+            'success'
+        );
+
+        // 修复：长段重建逻辑
+        if (result.is_long_segment) {
+            const key = `original-${result.original_index}`;
+            
+            // 初始化长段容器
+            if (!this.segmentsMap.has(key)) {
+                this.segmentsMap.set(key, {
+                    segments: [],
+                    totalSubSegments: result.sub_segment_count || 0,
+                    originalIndex: result.original_index
+                });
+            }
+            
+            const longSegmentData = this.segmentsMap.get(key);
+            longSegmentData.segments.push({
+                sub_segment_index: result.sub_segment_index,
+                text: result.text || '',
+                start_time: result.start_time,
+                end_time: result.end_time,
+                confidence: result.confidence || 0.9
+            });
+            
+            // 调试信息
+            console.log(`长段 ${result.original_index} 进度: ${longSegmentData.segments.length}/${longSegmentData.totalSubSegments} 子段`);
+            
+            // 判断是否收集完所有子段
+            if (longSegmentData.segments.length >= longSegmentData.totalSubSegments) {
+                // 排序并合并子段
+                const sortedSegments = longSegmentData.segments.sort((a, b) => a.sub_segment_index - b.sub_segment_index);
+                const combinedText = sortedSegments.map(s => s.text.trim()).filter(t => t).join(' ').trim();
+                const firstSegment = sortedSegments[0];
+                const lastSegment = sortedSegments[sortedSegments.length - 1];
+                
+                // 计算平均置信度
+                const avgConfidence = sortedSegments.reduce((sum, s) => sum + (s.confidence || 0), 0) / sortedSegments.length;
+                
+                console.log(`✅ 合并长段 ${result.original_index}: "${combinedText}"`);
+                
+                if (combinedText) {
+                    // 传递完整信息，包括 is_long_segment 标志
+                    this.appendToCombinedTranscript(combinedText, {
+                        segment_index: result.original_index,
+                        start_time: firstSegment.start_time,
+                        end_time: lastSegment.end_time,
+                        confidence: avgConfidence,
+                        is_long_segment: true,
+                        duration: (lastSegment.end_time - firstSegment.start_time).toFixed(2)
+                    });
+                }
+                
+                // 清理已处理的长段数据
+                this.segmentsMap.delete(key);
+            }
+        } else {
+            // 普通段直接添加
+            this.appendToCombinedTranscript(result.text || '（无文本）', {
+                segment_index: result.segment_index,
+                start_time: result.start_time,
+                end_time: result.end_time,
+                confidence: result.confidence,
+                duration: (result.end_time - result.start_time).toFixed(2)
+            });
+        }
+    }
+
+    handleSegmentError(result) {
+        this.showStatus(`❌ 段 #${result.segment_index} 失败: ${result.error}`, 'error');
+    }
+
+    handleFinalSummary(result) {
+        this.showStatus('✅ 所有段处理完成！', 'success');
+        this.updateProgress(100, '处理完成');
+
+        this.addSummaryInfo({
+            total_duration: result.total_duration,
+            total_segments: result.total_segments,
+            successful_segments: result.successful_segments || result.total_segments,
+            failed_segments: result.failed_segments || 0,
+            long_segments_count: result.long_segments_count || 0,
+            total_processing_time: result.total_processing_time || 0
+        });
+
+        // 简化完成状态
+        this.fileTranscript.innerHTML = `
+            <div style="padding: 25px; text-align: center; background: linear-gradient(135deg, #f0fdf4 0%, #ecfdf5 100%); border-radius: 16px; border: 1px solid #bbf7d0;">
+                <div style="font-size: 4rem; margin-bottom: 15px; color: #10b981;">✓</div>
+                <h2 style="color: #065f46; margin-bottom: 12px; font-size: 1.8rem;">转录已完成</h2>
+                <p style="font-size: 1.1rem; color: #166534; margin-bottom: 20px;">
+                    完整转录结果和处理摘要已在下方显示
+                </p>
+                <button onclick="document.getElementById('combinedTranscript').scrollIntoView({behavior: 'smooth'})" 
+                        style="margin-top: 12px; background: #10b981; color: white; border: none; padding: 10px 28px; border-radius: 10px; cursor: pointer; font-weight: 600; font-size: 1.05rem; transition: all 0.2s; box-shadow: 0 3px 8px rgba(16, 185, 129, 0.4);">
+                        查看完整转录
+                </button>
+            </div>
+        `;
+        this.fileTranscript.classList.remove('processing');
+        
+        this.showStatus(`🎉 转录完成！${(result.successful_segments || result.total_segments)}/${result.total_segments} 段成功`, 'success');
+    }
+}

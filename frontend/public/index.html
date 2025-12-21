@@ -1,0 +1,401 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SonicScribe — 实时语音转文字系统</title>
+    <style>
+        :root {
+            --primary: #4361ee;
+            --secondary: #3f37c9;
+            --success: #10b981;
+            --danger: #ef4444;
+            --warning: #f59e0b;
+            --light: #f8f9fa;
+            --dark: #212529;
+            --gray: #6b7280;
+        }
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            margin: 0;
+            padding: 0;
+            background-color: #f5f7fa;
+            color: #333;
+        }
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 2rem;
+        }
+        .tabs {
+            display: flex;
+            margin-bottom: 1.5rem;
+            border-bottom: 2px solid #e2e8f0;
+        }
+        .tab {
+            padding: 0.8rem 1.5rem;
+            cursor: pointer;
+            font-weight: 500;
+            border-bottom: 3px solid transparent;
+            transition: all 0.3s ease;
+        }
+        .tab.active {
+            color: var(--primary);
+            border-bottom: 3px solid var(--primary);
+        }
+        .tab-content {
+            display: none;
+        }
+        .tab-content.active {
+            display: block;
+        }
+        .control-panel {
+            background: white;
+            padding: 1.5rem;
+            border-radius: 12px;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.05);
+            margin-bottom: 1.5rem;
+        }
+        .btn {
+            background: var(--primary);
+            color: white;
+            border: none;
+            padding: 12px 24px;
+            font-size: 1rem;
+            border-radius: 8px;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            font-weight: 600;
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+        }
+        .btn:hover:not(:disabled) {
+            background: var(--secondary);
+            transform: translateY(-1px);
+        }
+        .btn:disabled {
+            background: #9ca3af;
+            cursor: not-allowed;
+            transform: none;
+        }
+        .btn-danger {
+            background: var(--danger);
+        }
+        .btn-danger:hover:not(:disabled) {
+            background: #dc2626;
+        }
+        .transcript-area {
+            background: white;
+            border-radius: 12px;
+            padding: 1.5rem;
+            min-height: 200px;
+            border: 2px solid #e2e8f0;
+            margin-top: 1rem;
+            line-height: 1.6;
+            font-size: 1.1rem;
+            overflow-y: auto;
+            transition: all 0.3s ease;
+        }
+        .transcript-area.processing {
+            border-color: var(--primary);
+            background: #eef4ff;
+        }
+        .vad-controls {
+            display: flex;
+            align-items: center;
+            gap: 1rem;
+            margin-top: 1rem;
+        }
+        .switch {
+            position: relative;
+            display: inline-block;
+            width: 50px;
+            height: 24px;
+        }
+        .switch input {
+            opacity: 0;
+            width: 0;
+            height: 0;
+        }
+        .slider {
+            position: absolute;
+            cursor: pointer;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background-color: #ccc;
+            transition: .4s;
+            border-radius: 24px;
+        }
+        .slider:before {
+            position: absolute;
+            content: "";
+            height: 16px;
+            width: 16px;
+            left: 4px;
+            bottom: 4px;
+            background-color: white;
+            transition: .4s;
+            border-radius: 50%;
+        }
+        input:checked + .slider {
+            background-color: var(--primary);
+        }
+        input:checked + .slider:before {
+            transform: translateX(26px);
+        }
+        .status-indicator {
+            display: inline-block;
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+            margin-right: 8px;
+            background: var(--gray);
+            transition: all 0.3s ease;
+        }
+        .status-indicator.active {
+            background: var(--success);
+            box-shadow: 0 0 8px rgba(16, 185, 129, 0.6);
+        }
+        .status-indicator.recording {
+            background: var(--danger);
+            box-shadow: 0 0 8px rgba(239, 68, 68, 0.6);
+        }
+        .file-upload-area {
+            border: 2px dashed #cbd5e1;
+            border-radius: 12px;
+            padding: 2rem;
+            text-align: center;
+            margin: 1.5rem 0;
+            background: #f8fafc;
+            cursor: pointer;
+            transition: all 0.3s ease;
+        }
+        .file-upload-area:hover {
+            border-color: var(--primary);
+            background: #eef4ff;
+        }
+        .file-upload-area.dragover {
+            border-color: var(--primary);
+            background: #dbeafe;
+        }
+        .file-info {
+            margin-top: 1rem;
+            text-align: left;
+            padding: 0.8rem;
+            background: white;
+            border-radius: 8px;
+            border: 1px solid #e2e8f0;
+            display: none;
+        }
+        .progress-container {
+            margin: 1.5rem 0;
+            display: none;
+        }
+        .progress-bar {
+            height: 8px;
+            background: #e2e8f0;
+            border-radius: 4px;
+            overflow: hidden;
+            margin-top: 8px;
+        }
+        .progress-fill {
+            height: 100%;
+            background: var(--primary);
+            width: 0%;
+            transition: width 0.3s ease;
+        }
+        .voice-level {
+            height: 8px;
+            background: #e2e8f0;
+            border-radius: 4px;
+            margin-top: 10px;
+            overflow: hidden;
+            position: relative;
+        }
+        .voice-level-fill {
+            height: 100%;
+            background: var(--success);
+            width: 0%;
+            transition: width 0.1s ease;
+            border-radius: 4px;
+        }
+        .loading {
+            display: inline-block;
+            width: 24px;
+            height: 24px;
+            border: 3px solid rgba(67, 97, 238, 0.3);
+            border-radius: 50%;
+            border-top-color: var(--primary);
+            animation: spin 1s linear infinite;
+            margin-right: 8px;
+        }
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+        @media (max-width: 768px) {
+            .container {
+                padding: 1rem;
+            }
+            .tab {
+                flex: 1;
+                text-align: center;
+                padding: 0.8rem;
+            }
+        }
+
+        /* 分层输出样式 */
+        .transcript-segment {
+            transition: all 0.3s ease;
+            margin: 2px;
+            padding: 2px 4px;
+            border-radius: 4px;
+            display: inline-block;
+            line-height: 1.5;
+        }
+
+        .tentative-text {
+            color: #6b7280;
+            opacity: 0.8;
+            font-style: italic;
+            background-color: #f3f4f6;
+        }
+
+        .committed-text {
+            color: #1f2937;
+            font-weight: normal;
+            background-color: transparent;
+        }
+
+        .corrected-text {
+            color: #ef4444;
+            text-decoration: line-through;
+            background-color: #fee2e2;
+            opacity: 0.7;
+            animation: fadeOut 0.8s forwards;
+        }
+
+        .new-text {
+            color: #10b981;
+            background-color: #dcfce7;
+            animation: fadeIn 0.5s ease-out;
+        }
+
+        @keyframes fadeOut {
+            to {
+                opacity: 0;
+                transform: translateX(-10px);
+            }
+        }
+
+        @keyframes fadeIn {
+            from {
+                opacity: 0;
+                transform: translateX(10px);
+            }
+            to {
+                opacity: 1;
+                transform: translateX(0);
+            }
+        }
+
+        .status-indicator.recording .tentative-text {
+            animation: pulse 1.5s infinite;
+        }
+
+        @keyframes pulse {
+            0% { opacity: 0.6; }
+            50% { opacity: 1.0; }
+            100% { opacity: 0.6; }
+        }
+
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🎤 SonicScribe — 实时语音转文字系统</h1>
+        
+        <div class="tabs">
+            <div class="tab active" data-tab="realtime">实时对话</div>
+            <div class="tab" data-tab="file">文件分析</div>
+        </div>
+        
+        <div class="tab-content active" id="realtime-tab">
+            <div class="control-panel">
+                <h2>🎤 实时对话</h2>
+                <div style="display: flex; align-items: center; gap: 1rem; margin: 1rem 0;">
+                    <span class="status-indicator" id="connectionStatus"></span>
+                    <span>连接状态: <span id="connectionText">未连接</span></span>
+                </div>
+                
+                <button id="startBtn" class="btn">
+                    <span class="loading" style="display: none;"></span>
+                    <span id="btnText">开始对话</span>
+                </button>
+                
+                <div class="vad-controls">
+                    <label style="display: flex; align-items: center; gap: 0.5rem;">
+                        <span>VAD 检测:</span>
+                        <label class="switch">
+                            <input type="checkbox" id="vadEnabled" checked>
+                            <span class="slider"></span>
+                        </label>
+                    </label>
+                    
+                    <div style="flex: 1; margin-left: 1rem;">
+                        <label for="vadThreshold">VAD 阈值: <span id="thresholdValue">0.5</span></label>
+                        <input type="range" id="vadThreshold" min="0.1" max="0.9" step="0.1" value="0.5" style="width: 100%; margin-top: 4px;">
+                    </div>
+                </div>
+                
+                <div class="voice-level">
+                    <div class="voice-level-fill" id="voiceLevelFill"></div>
+                </div>
+            </div>
+            
+            <div class="transcript-area" id="realtimeTranscript">
+                实时对话内容将显示在这里... <br>
+            </div>
+        </div>
+        
+        <div class="tab-content" id="file-tab">
+            <div class="control-panel">
+                <h2>📁 文件分析</h2>
+                <p>支持格式: WAV, MP3, M4A, FLAC, OGG (最大 100MB)</p>
+                
+                <div class="file-upload-area" id="uploadArea">
+                    <div class="loading" id="uploadLoading" style="display: none; margin: 0 auto;"></div>
+                    <div class="progress-container" style="display:none; margin:20px 0">
+                        <div class="progress-bar" id="uploadProgress" style="width:0%"></div>
+                    </div>
+                    <div id="uploadText">📁 点击上传音频文件 或 拖拽文件到此处</div>
+                </div>
+                
+                <div class="file-info" id="fileInfo">
+                    <div class="file-name" id="fileName">文件名</div>
+                    <div class="file-size" id="fileSize">0 KB</div>
+                </div>
+                
+                <button id="transcribeFileBtn" class="btn" disabled>
+                    <span class="loading" style="display: none;"></span>
+                    <span>开始转文字</span>
+                </button>
+            </div>
+            
+            <div class="progress-container" id="progressContainer">
+                <div class="progress-bar">
+                    <div class="progress-fill" id="progressFill"></div>
+                </div>
+            </div>
+            
+            <div class="transcript-area" id="fileTranscript">
+                文件转录结果将显示在这里...
+            </div>
+        </div>
+    </div>
+    
+    <script src="/bundle.js"></script>
+</body>
+</html>
