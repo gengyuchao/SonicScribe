@@ -30,7 +30,7 @@ class AppConfig:
     VAD_PROCESS_WINDOW = 10  # 语音活动窗口大小
     # 转录配置
     TEMPORARY_TRANSCRIPTION_INTERVAL = 20  # 每20个片段(1.28秒)进行临时转录
-    MAX_SEGMENT_DURATION = 20.0  # 单个语音段最大20秒
+    MAX_SEGMENT_DURATION = 30.0  # 单个语音段最大30秒
     # 任务配置
     VAD_PROCESSING_INTERVAL_MS = AUDIO_CHUNK_DURATION_MS  # VAD处理间隔
     MAX_SPEECH_SEGMENTS = 3  # 最多同时处理3个语音段

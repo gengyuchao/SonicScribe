@@ -1,85 +1,505 @@
 export class FileAnalyzer {
     constructor() {
+        this.initializeState();
+        this.initializeUI();
+        this.bindEvents();
+    }
+
+    initializeState() {
         this.currentFile = null;
+        this.originalFile = null;
         this.abortController = null;
         this.isTranscribing = false;
-        this.segmentsMap = new Map();
-        this.receivedData = '';
-        this.isCompressed = false;
-        this.processedMessageIds = new Set(); // 用于跟踪已处理的消息ID
         this.isAborted = false;
-        this.xhr = null;
+        this.isCompressed = false;
         this.uploadStartTime = 0;
-
-        this.initElements();
-        this.initEvents();
+        this.receivedData = '';
+        this.xhr = null;
+        
+        this.segmentsMap = new Map();
+        this.processedMessageIds = new Set();
+        
+        this.elements = {};
+        this.theme = {
+            success: { bg: '#d4edda', color: '#155724', border: '#c3e6cb' },
+            error: { bg: '#f8d7da', color: '#721c24', border: '#f5c6cb' },
+            warning: { bg: '#fff3cd', color: '#856404', border: '#ffeeba' },
+            info: { bg: '#d1ecf1', color: '#0c5460', border: '#bee5eb' }
+        };
     }
 
-    $(id) {
-        return document.getElementById(id);
+    initializeUI() {
+        this.cacheElements();
+        this.createDynamicElements();
+        this.injectBaseStyles();
     }
 
-    initElements() {
-        this.uploadArea = this.$('uploadArea');
-        this.uploadLoading = this.$('uploadLoading');
-        this.fileInfo = this.$('fileInfo');
-        this.fileNameEl = this.$('fileName');
-        this.fileSizeEl = this.$('fileSize');
-        this.transcribeFileBtn = this.$('transcribeFileBtn');
-        this.progressContainer = this.$('progressContainer');
-        this.progressFill = this.$('progressFill');
-        this.fileTranscript = this.$('fileTranscript');
-
-        this.statusMessage = this.ensureElement('statusMessage', this.createStatusMessageElement.bind(this));
-        this.stopTranscribeBtn = this.ensureElement('stopTranscribeBtn', this.createStopButtonElement.bind(this));
-        this.summaryContainer = this.ensureElement('summaryContainer', this.createSummaryContainerElement.bind(this));
-        this.combinedTranscript = this.ensureElement('combinedTranscript', this.createCombinedTranscriptElement.bind(this));
-    }
-
-    ensureElement(id, creator) {
-        let el = this.$(id);
-        if (!el) {
-            el = creator();
-            const ref = this.getInsertionRef(id);
-            if (ref && ref.parentNode) {
-                ref.parentNode.insertBefore(el, ref.nextSibling);
-            } else {
-                document.body.appendChild(el);
+    injectBaseStyles() {
+        const style = document.createElement('style');
+        style.textContent = `
+            /* 基础样式 */
+            :root {
+                --primary-color: #3b82f6;
+                --primary-dark: #2563eb;
+                --success-color: #10b981;
+                --success-dark: #059669;
+                --warning-color: #f59e0b;
+                --warning-dark: #d97706;
+                --error-color: #ef4444;
+                --error-dark: #dc2626;
+                --gray-100: #f3f4f6;
+                --gray-200: #e5e7eb;
+                --gray-300: #d1d5db;
+                --gray-400: #9ca3af;
+                --gray-500: #6b7280;
+                --gray-600: #4b5563;
+                --gray-700: #374151;
+                --gray-800: #1f2937;
+                --gray-900: #0f172a;
+                --white: #ffffff;
+                --shadow-sm: 0 1px 2px 0 rgba(0, 0, 0, 0.05);
+                --shadow: 0 1px 3px 0 rgba(0, 0, 0, 0.1), 0 1px 2px 0 rgba(0, 0, 0, 0.06);
+                --shadow-md: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06);
+                --shadow-lg: 0 10px 15px -3px rgba(0, 0, 0, 0.1), 0 4px 6px -2px rgba(0, 0, 0, 0.05);
+                --rounded-sm: 0.125rem;
+                --rounded: 0.25rem;
+                --rounded-md: 0.375rem;
+                --rounded-lg: 0.5rem;
+                --rounded-xl: 0.75rem;
+                --rounded-2xl: 1rem;
+                --rounded-full: 9999px;
+                --transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
             }
-        }
-        return el;
+            
+            /* 按钮美化 */
+            .action-btn {
+                display: inline-flex;
+                align-items: center;
+                justify-content: center;
+                gap: 6px;
+                padding: 8px 16px;
+                border-radius: var(--rounded-md);
+                font-weight: 600;
+                font-size: 0.95rem;
+                cursor: pointer;
+                transition: var(--transition);
+                border: none;
+                box-shadow: var(--shadow-sm);
+            }
+            
+            .start-btn {
+                background: linear-gradient(135deg, var(--primary-color), var(--primary-dark));
+                color: white;
+                min-width: 120px;
+            }
+            
+            .start-btn:hover:not(:disabled) {
+                background: linear-gradient(135deg, var(--primary-dark), #1d4ed8);
+                transform: translateY(-1px);
+                box-shadow: var(--shadow);
+            }
+            
+            .start-btn:disabled {
+                opacity: 0.7;
+                cursor: not-allowed;
+                transform: none;
+                box-shadow: none;
+            }
+            
+            .stop-btn {
+                background: linear-gradient(135deg, var(--error-color), var(--error-dark));
+                color: white;
+                min-width: 100px;
+            }
+            
+            .stop-btn:hover {
+                background: linear-gradient(135deg, var(--error-dark), #b91c1c);
+                transform: translateY(-1px);
+                box-shadow: var(--shadow);
+            }
+            
+            /* 转录内容重新设计 - 避免重叠 */
+            .transcript-container {
+                min-height: 400px;
+                max-height: 600px;
+                overflow-y: auto;
+                padding: 12px;
+                background: var(--white);
+                border-radius: var(--rounded-lg);
+                border: 1px solid var(--gray-200);
+                box-shadow: var(--shadow-sm);
+            }
+            
+            .transcript-line {
+                position: relative;
+                padding: 12px 16px;
+                margin: 8px 0;
+                border-radius: var(--rounded-md);
+                background: var(--gray-100);
+                transition: var(--transition);
+                border-left: 3px solid var(--primary-color);
+                display: flex;
+                flex-direction: column;
+                gap: 4px;
+            }
+            
+            .transcript-line:hover {
+                background: #dbeafe;
+                transform: translateX(2px);
+                border-left-width: 4px;
+            }
+            
+            .line-header {
+                display: flex;
+                justify-content: space-between;
+                align-items: center;
+                font-size: 0.85rem;
+                color: var(--gray-600);
+            }
+            
+            .segment-index {
+                background: var(--primary-color);
+                color: white;
+                font-size: 0.8rem;
+                font-weight: 600;
+                padding: 2px 8px;
+                border-radius: var(--rounded-full);
+                min-width: 40px;
+                text-align: center;
+            }
+            
+            .audio-position {
+                font-family: monospace;
+                color: var(--gray-700);
+                font-weight: 500;
+            }
+            
+            .segment-duration {
+                background: var(--primary-color);
+                color: white;
+                font-size: 0.75rem;
+                padding: 1px 6px;
+                border-radius: var(--rounded-full);
+                margin-left: 8px;
+            }
+            
+            .segment-content {
+                font-size: 1.05rem;
+                line-height: 1.5;
+                color: var(--gray-800);
+                font-weight: 500;
+                word-break: break-word;
+            }
+            
+            /* 长段落设计 */
+            .long-segment-line {
+                position: relative;
+                padding: 12px 16px;
+                margin: 8px 0;
+                border-radius: var(--rounded-md);
+                background: #fffbeb;
+                border-left: 3px solid var(--warning-color);
+                transition: var(--transition);
+                display: flex;
+                flex-direction: column;
+                gap: 4px;
+            }
+            
+            .long-segment-line:hover {
+                background: #fef3c7;
+                transform: translateX(2px);
+                border-left-width: 4px;
+            }
+            
+            .long-segment-index {
+                background: var(--warning-color);
+                color: white;
+                font-size: 0.8rem;
+                font-weight: 600;
+                padding: 2px 8px;
+                border-radius: var(--rounded-full);
+                min-width: 60px;
+                text-align: center;
+            }
+            
+            .long-audio-position {
+                font-family: monospace;
+                color: var(--warning-dark);
+                font-weight: 500;
+            }
+            
+            .long-segment-duration {
+                background: var(--warning-color);
+                color: white;
+                font-size: 0.75rem;
+                padding: 1px 6px;
+                border-radius: var(--rounded-full);
+                margin-left: 8px;
+            }
+            
+            .long-segment-content {
+                font-size: 1.05rem;
+                line-height: 1.5;
+                color: var(--gray-800);
+                font-weight: 500;
+                word-break: break-word;
+            }
+            
+            /* 正在转录区域 */
+            .processing-container {
+                min-height: 250px;
+                display: flex;
+                flex-direction: column;
+                align-items: center;
+                justify-content: center;
+                background: linear-gradient(135deg, #dbeafe 0%, #bfdbfe 100%);
+                border-radius: var(--rounded-xl);
+                padding: 30px;
+                text-align: center;
+                border: 2px solid var(--primary-color);
+            }
+            
+            .processing-icon {
+                font-size: 3.5rem;
+                color: var(--primary-color);
+                margin-bottom: 20px;
+                animation: pulse 2s infinite;
+            }
+            
+            .processing-title {
+                font-size: 1.8rem;
+                font-weight: 700;
+                color: var(--primary-dark);
+                margin-bottom: 12px;
+            }
+            
+            .processing-subtitle {
+                font-size: 1.2rem;
+                color: var(--gray-700);
+                margin-bottom: 25px;
+                line-height: 1.6;
+            }
+            
+            .upload-speed {
+                font-size: 1.1rem;
+                font-weight: 500;
+                color: var(--gray-800);
+                background: rgba(255, 255, 255, 0.8);
+                padding: 8px 20px;
+                border-radius: var(--rounded-full);
+                margin-top: 15px;
+                min-width: 300px;
+            }
+            
+            /* 摘要信息 */
+            .summary-container {
+                margin: 15px 0;
+            }
+            
+            .summary-grid {
+                display: grid;
+                grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+                gap: 10px;
+                margin-top: 10px;
+            }
+            
+            .summary-card {
+                background: var(--white);
+                border: 1px solid var(--gray-200);
+                border-radius: var(--rounded-lg);
+                padding: 12px;
+                text-align: center;
+                transition: var(--transition);
+                box-shadow: var(--shadow-sm);
+            }
+            
+            .summary-card:hover {
+                transform: translateY(-2px);
+                box-shadow: var(--shadow);
+                border-color: var(--primary-color);
+            }
+            
+            .summary-label {
+                font-size: 0.85rem;
+                color: var(--gray-500);
+                margin-bottom: 4px;
+                font-weight: 500;
+            }
+            
+            .summary-value {
+                font-size: 1.25rem;
+                font-weight: 700;
+                color: var(--primary-color);
+            }
+            
+            /* 完成界面 */
+            .completion-container {
+                padding: 30px;
+                text-align: center;
+                background: linear-gradient(135deg, #dcfce7 0%, #bef264 100%);
+                border-radius: var(--rounded-2xl);
+                border: 2px solid var(--success-color);
+            }
+            
+            .completion-icon {
+                font-size: 4rem;
+                color: var(--success-color);
+                margin-bottom: 20px;
+                animation: bounce 1s ease;
+            }
+            
+            .completion-title {
+                font-size: 2rem;
+                font-weight: 800;
+                color: var(--success-dark);
+                margin-bottom: 15px;
+                background: linear-gradient(to right, var(--success-dark), var(--success-color));
+                -webkit-background-clip: text;
+                -webkit-text-fill-color: transparent;
+            }
+            
+            .completion-text {
+                font-size: 1.25rem;
+                color: var(--gray-800);
+                margin-bottom: 25px;
+                line-height: 1.6;
+                font-weight: 500;
+            }
+            
+            .view-btn {
+                background: linear-gradient(135deg, var(--success-color), var(--success-dark));
+                color: white;
+                padding: 12px 32px;
+                font-size: 1.1rem;
+                font-weight: 600;
+                border-radius: var(--rounded-full);
+                border: none;
+                cursor: pointer;
+                transition: var(--transition);
+                box-shadow: 0 4px 15px rgba(16, 185, 129, 0.4);
+            }
+            
+            .view-btn:hover {
+                background: linear-gradient(135deg, var(--success-dark), #047857);
+                transform: translateY(-2px);
+                box-shadow: 0 6px 20px rgba(16, 185, 129, 0.6);
+            }
+            
+            /* 动画效果 */
+            @keyframes pulse {
+                0% { opacity: 1; }
+                50% { opacity: 0.7; }
+                100% { opacity: 1; }
+            }
+            
+            @keyframes bounce {
+                0%, 100% { transform: translateY(0); }
+                50% { transform: translateY(-10px); }
+            }
+            
+            @keyframes spin {
+                0% { transform: rotate(0deg); }
+                100% { transform: rotate(360deg); }
+            }
+            
+            /* 滚动条美化 */
+            .transcript-container::-webkit-scrollbar {
+                width: 8px;
+            }
+            
+            .transcript-container::-webkit-scrollbar-track {
+                background: var(--gray-100);
+                border-radius: var(--rounded-full);
+            }
+            
+            .transcript-container::-webkit-scrollbar-thumb {
+                background: var(--primary-color);
+                border-radius: var(--rounded-full);
+                transition: var(--transition);
+            }
+            
+            .transcript-container::-webkit-scrollbar-thumb:hover {
+                background: var(--primary-dark);
+            }
+            
+            /* 状态消息 */
+            .status-bar {
+                padding: 10px;
+                border-radius: var(--rounded-lg);
+                font-weight: 500;
+                margin: 10px 0;
+                animation: fadeIn 0.3s ease;
+            }
+            
+            @keyframes fadeIn {
+                from { opacity: 0; transform: translateY(10px); }
+                to { opacity: 1; transform: translateY(0); }
+            }
+            
+            /* 加载指示器 */
+            .loading-spinner {
+                display: inline-block;
+                width: 20px;
+                height: 20px;
+                border: 2px solid white;
+                border-top: 2px solid transparent;
+                border-radius: 50%;
+                animation: spin 1s linear infinite;
+            }
+        `;
+        document.head.appendChild(style);
     }
 
-    getInsertionRef(id) {
-        if (id === 'statusMessage') return this.progressContainer;
-        if (id === 'stopTranscribeBtn') return this.transcribeFileBtn;
-        if (id === 'summaryContainer') return this.fileTranscript;
-        if (id === 'combinedTranscript') return this.summaryContainer;
-        return this.fileTranscript;
+    cacheElements() {
+        const elementIds = [
+            'uploadArea', 'uploadLoading', 'fileInfo', 'fileName', 'fileSize',
+            'transcribeFileBtn', 'progressContainer', 'progressFill', 'fileTranscript'
+        ];
+        
+        elementIds.forEach(id => {
+            this.elements[id] = document.getElementById(id);
+        });
+    }
+
+    createDynamicElements() {
+        const dynamicElements = [
+            { id: 'statusMessage', creator: this.createStatusMessageElement.bind(this), ref: 'progressContainer' },
+            { id: 'stopTranscribeBtn', creator: this.createStopButtonElement.bind(this), ref: 'transcribeFileBtn' },
+            { id: 'summaryContainer', creator: this.createSummaryContainerElement.bind(this), ref: 'fileTranscript' },
+            { id: 'combinedTranscript', creator: this.createCombinedTranscriptElement.bind(this), ref: 'summaryContainer' }
+        ];
+
+        dynamicElements.forEach(({ id, creator, ref }) => {
+            let el = document.getElementById(id);
+            if (!el) {
+                el = creator();
+                const refElement = this.elements[ref] || document.body;
+                if (refElement.parentNode) {
+                    refElement.parentNode.insertBefore(el, refElement.nextSibling);
+                } else {
+                    document.body.appendChild(el);
+                }
+            }
+            this.elements[id] = el;
+        });
     }
 
     createStatusMessageElement() {
         const el = document.createElement('div');
         el.id = 'statusMessage';
-        el.className = 'status-message';
-        Object.assign(el.style, {
-            margin: '10px 0',
-            padding: '8px 12px',
-            borderRadius: '4px',
-            fontSize: '14px'
-        });
+        el.className = 'status-bar';
         return el;
     }
 
     createStopButtonElement() {
         const btn = document.createElement('button');
         btn.id = 'stopTranscribeBtn';
-        btn.className = 'btn btn-danger';
+        btn.className = 'action-btn stop-btn';
         Object.assign(btn.style, {
-            marginLeft: '10px',
+            marginLeft: '12px',
             display: 'none'
         });
-        btn.innerHTML = '⏹️ 停止处理';
+        btn.innerHTML = '<span>⏹️</span> <span>停止</span>';
         return btn;
     }
 
@@ -91,9 +511,9 @@ export class FileAnalyzer {
             display: 'none'
         });
         container.innerHTML = `
-            <div class="summary-box" style="background: white; border: 1px solid #e2e8f0; border-radius: 12px; padding: 15px; margin-top: 15px;">
-                <h3 style="margin-top: 0; color: #333; border-bottom: 2px solid #4361ee; padding-bottom: 8px;">处理摘要</h3>
-                <div id="summaryContent" style="display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; margin-top: 10px;"></div>
+            <div class="summary-container">
+                <h3 style="margin: 0 0 10px 0; color: var(--gray-800); border-bottom: 2px solid var(--primary-color); padding-bottom: 6px; font-size: 1.4rem; font-weight: 700;">处理摘要</h3>
+                <div id="summaryContent" class="summary-grid"></div>
             </div>
         `;
         return container;
@@ -107,75 +527,97 @@ export class FileAnalyzer {
             display: 'none'
         });
         container.innerHTML = `
-            <div class="combined-transcript" style="background: white; border: 1px solid #e2e8f0; border-radius: 12px; padding: 15px; margin-top: 15px;">
-                <h3 style="margin-top: 0; color: #333; border-bottom: 2px solid #4361ee; padding-bottom: 8px;">完整转录结果</h3>
-                <div id="combinedContent" class="transcript-content" style="line-height: 1.6; font-size: 1.1rem; min-height: 100px;"></div>
+            <div class="combined-transcript">
+                <h3 style="margin: 0 0 12px 0; color: var(--gray-800); border-bottom: 2px solid var(--primary-color); padding-bottom: 6px; font-size: 1.4rem; font-weight: 700;">完整转录结果</h3>
+                <div id="combinedContent" class="transcript-container"></div>
             </div>
         `;
         return container;
     }
 
-    initEvents() {
-        this.uploadArea.addEventListener('click', () => {
+    bindEvents() {
+        this.setupFileUploadEvents();
+        this.setupTranscriptionEvents();
+    }
+
+    setupFileUploadEvents() {
+        const { uploadArea } = this.elements;
+        
+        uploadArea.addEventListener('click', () => {
             const fileInput = document.createElement('input');
             fileInput.type = 'file';
             fileInput.accept = 'audio/*, .wav, .mp3, .m4a, .flac, .ogg';
             fileInput.onchange = (e) => {
-                if (e.target.files.length > 0) {
-                    this.handleFileSelect(e.target.files[0]);
-                }
+                const file = e.target.files[0];
+                if (file) this.handleFileSelect(file);
                 fileInput.remove();
             };
             fileInput.click();
         });
 
         ['dragover', 'dragenter'].forEach(event => {
-            this.uploadArea.addEventListener(event, (e) => {
+            uploadArea.addEventListener(event, (e) => {
                 e.preventDefault();
-                this.uploadArea.classList.add('dragover');
+                uploadArea.classList.add('dragover');
             });
         });
 
-        this.uploadArea.addEventListener('dragleave', () => {
-            this.uploadArea.classList.remove('dragover');
+        uploadArea.addEventListener('dragleave', () => {
+            uploadArea.classList.remove('dragover');
         });
 
-        this.uploadArea.addEventListener('drop', (e) => {
+        uploadArea.addEventListener('drop', (e) => {
             e.preventDefault();
-            this.uploadArea.classList.remove('dragover');
+            uploadArea.classList.remove('dragover');
             const file = e.dataTransfer.files[0];
             if (file) this.handleFileSelect(file);
         });
+    }
 
-        this.transcribeFileBtn.addEventListener('click', () => this.startTranscription());
-        if (this.stopTranscribeBtn) {
-            this.stopTranscribeBtn.addEventListener('click', () => this.stopTranscription());
+    setupTranscriptionEvents() {
+        const { transcribeFileBtn, stopTranscribeBtn } = this.elements;
+        
+        if (transcribeFileBtn) {
+            transcribeFileBtn.addEventListener('click', () => this.startTranscription());
+        }
+        
+        if (stopTranscribeBtn) {
+            stopTranscribeBtn.addEventListener('click', () => this.stopTranscription());
         }
     }
 
-    setVisibility(el, visible) {
-        if (el) el.style.display = visible ? 'block' : 'none';
+    getElement(id) {
+        return this.elements[id];
+    }
+
+    setVisibility(element, visible) {
+        if (!element) return;
+        element.style.display = visible ? 'block' : 'none';
     }
 
     clearPreviousResults() {
-        this.fileTranscript.innerHTML = '文件转录结果将显示在这里...';
-        this.fileTranscript.className = 'transcript-area';
+        const { fileTranscript, progressFill, statusMessage } = this.elements;
+        
+        if (fileTranscript) {
+            fileTranscript.innerHTML = '文件转录结果将显示在这里...';
+            fileTranscript.className = 'transcript-area';
+        }
 
         ['summaryContent', 'combinedContent'].forEach(id => {
-            const el = this.$(id);
+            const el = document.getElementById(id);
             if (el) el.innerHTML = '';
         });
 
-        [this.summaryContainer, this.combinedTranscript].forEach(el => {
+        [this.elements.summaryContainer, this.elements.combinedTranscript].forEach(el => {
             this.setVisibility(el, false);
         });
 
-        if (this.progressFill) this.progressFill.style.width = '0%';
-        this.setVisibility(this.progressContainer, false);
+        if (progressFill) progressFill.style.width = '0%';
+        this.setVisibility(this.elements.progressContainer, false);
 
-        if (this.statusMessage) {
-            this.statusMessage.textContent = '';
-            this.statusMessage.removeAttribute('style');
+        if (statusMessage) {
+            statusMessage.textContent = '';
+            statusMessage.removeAttribute('style');
         }
 
         this.segmentsMap.clear();
@@ -195,15 +637,16 @@ export class FileAnalyzer {
 
         this.currentFile = file;
         this.displayFileInfo(file);
-        this.transcribeFileBtn.disabled = false;
+        this.elements.transcribeFileBtn.disabled = false;
         this.clearPreviousResults();
         this.showStatus(`✅ 已选择文件: ${file.name}`, 'success');
     }
 
     displayFileInfo(file) {
-        this.fileNameEl.textContent = file.name;
-        this.fileSizeEl.textContent = this.formatFileSize(file.size);
-        this.setVisibility(this.fileInfo, true);
+        const { fileName, fileSize } = this.elements;
+        if (fileName) fileName.textContent = file.name;
+        if (fileSize) fileSize.textContent = this.formatFileSize(file.size);
+        this.setVisibility(this.elements.fileInfo, true);
     }
 
     formatFileSize(bytes) {
@@ -215,18 +658,13 @@ export class FileAnalyzer {
     }
 
     showStatus(message, type = 'info') {
-        if (!this.statusMessage || this.isAborted) return;
+        const { statusMessage } = this.elements;
+        if (!statusMessage || this.isAborted) return;
 
-        this.statusMessage.textContent = message;
+        statusMessage.textContent = message;
+        const theme = this.theme[type] || this.theme.info;
 
-        const theme = {
-            success: { bg: '#d4edda', color: '#155724', border: '#c3e6cb' },
-            error: { bg: '#f8d7da', color: '#721c24', border: '#f5c6cb' },
-            warning: { bg: '#fff3cd', color: '#856404', border: '#ffeeba' },
-            info: { bg: '#d1ecf1', color: '#0c5460', border: '#bee5eb' }
-        }[type] || theme.info;
-
-        Object.assign(this.statusMessage.style, {
+        Object.assign(statusMessage.style, {
             backgroundColor: theme.bg,
             color: theme.color,
             border: `1px solid ${theme.border}`
@@ -234,9 +672,9 @@ export class FileAnalyzer {
 
         if (type === 'success' || type === 'info') {
             setTimeout(() => {
-                if (this.statusMessage && this.statusMessage.textContent === message && !this.isTranscribing) {
-                    this.statusMessage.textContent = '';
-                    this.statusMessage.removeAttribute('style');
+                if (statusMessage && statusMessage.textContent === message && !this.isTranscribing) {
+                    statusMessage.textContent = '';
+                    statusMessage.removeAttribute('style');
                 }
             }, 3000);
         }
@@ -251,7 +689,12 @@ export class FileAnalyzer {
 
         try {
             this.showStatus('🔊 优化音频质量 (重采样到16kHz)...', 'info');
-            const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+            const AudioContext = window.AudioContext || window.webkitAudioContext;
+            if (!AudioContext) {
+                throw new Error('浏览器不支持音频处理');
+            }
+
+            const audioCtx = new AudioContext();
             const arrayBuffer = await file.arrayBuffer();
             const audioBuffer = await audioCtx.decodeAudioData(arrayBuffer);
             
@@ -329,6 +772,9 @@ export class FileAnalyzer {
     }
 
     async startTranscription() {
+        // 确保清理之前的请求
+        this.cleanupPreviousRequest();
+        
         if (!this.currentFile) {
             this.showStatus('❌ 请先选择一个音频文件', 'error');
             return;
@@ -342,7 +788,7 @@ export class FileAnalyzer {
         this.isTranscribing = true;
         this.isAborted = false;
         this.transcribeFileBtn.disabled = true;
-        this.transcribeFileBtn.innerHTML = '<span class="loading" style="display: inline-block; margin-right: 8px;"></span><span>上传中...</span>';
+        this.transcribeFileBtn.innerHTML = '<span class="loading-spinner"></span><span>上传中...</span>';
         this.setVisibility(this.uploadLoading, true);
         this.resetUIForNewTranscription();
         this.uploadStartTime = Date.now();
@@ -361,11 +807,12 @@ export class FileAnalyzer {
 
             this.receivedData = '';
             
-            // 创建并保存XHR引用
             this.xhr = new XMLHttpRequest();
             this.xhr.open('POST', '/transcribe/file', true);
             
-            // 绑定进度事件
+            // 设置超时
+            this.xhr.timeout = 300000; // 5分钟
+            
             this.xhr.upload.onprogress = (e) => {
                 if (this.isAborted || !this.isTranscribing) return;
                 
@@ -379,26 +826,23 @@ export class FileAnalyzer {
                 }
             };
             
-            // 流式处理响应
             this.xhr.onprogress = () => {
                 if (this.isAborted || !this.isTranscribing) return;
                 
                 const chunk = this.xhr.responseText.substring(this.receivedData.length);
                 this.processStreamData(chunk);
-                this.receivedData = this.xhr.responseText; // 更新已处理的数据
+                this.receivedData = this.xhr.responseText;
             };
             
-            // 上传完成回调
             this.xhr.onload = () => {
                 if (this.isAborted) return;
                 
                 if (this.xhr.status >= 200 && this.xhr.status < 300) {
-                    // 处理剩余数据
                     const remainingData = this.xhr.responseText.substring(this.receivedData.length);
                     if (remainingData) {
                         this.processStreamData(remainingData);
                     }
-                    this.finalizeTranscription(true); // 标记为正常完成
+                    this.finalizeTranscription(true);
                 } else {
                     try {
                         const errorData = JSON.parse(this.xhr.responseText);
@@ -416,18 +860,24 @@ export class FileAnalyzer {
             };
             
             this.xhr.onabort = () => {
-                if (!this.isAborted) { // 只有在非主动中止的情况下才处理
-                    this.handleTranscriptionError(new DOMException('上传已中止', 'AbortError'));
+                if (!this.isAborted) {
+                    this.handleTranscriptionError(new Error('上传已中止'));
                 }
             };
             
-            // 绑定AbortController
+            this.xhr.ontimeout = () => {
+                if (!this.isAborted) {
+                    this.handleTranscriptionError(new Error('请求超时，请重试'));
+                }
+            };
+            
             const abortSignal = this.abortController.signal;
             abortSignal.addEventListener('abort', () => {
                 this.isAborted = true;
                 if (this.xhr) {
                     this.xhr.abort();
                 }
+                this.handleAbortCleanup();
             });
             
             this.xhr.setRequestHeader('X-File-Size', this.currentFile.size.toString());
@@ -435,7 +885,6 @@ export class FileAnalyzer {
                 this.xhr.setRequestHeader('X-Original-File-Size', this.originalFile.size.toString());
             }
             
-            // 开始上传
             this.xhr.send(formData);
             this.setVisibility(this.stopTranscribeBtn, true);
 
@@ -447,10 +896,36 @@ export class FileAnalyzer {
         }
     }
 
+    cleanupPreviousRequest() {
+        if (this.xhr) {
+            this.xhr.abort();
+            this.xhr = null;
+        }
+        if (this.abortController) {
+            this.abortController.abort();
+            this.abortController = null;
+        }
+        this.isAborted = false;
+    }
+
+    handleAbortCleanup() {
+        // 清理所有相关资源
+        this.segmentsMap.clear();
+        this.processedMessageIds.clear();
+        this.receivedData = '';
+        
+        // 更新UI状态
+        this.setVisibility(this.stopTranscribeBtn, false);
+        this.transcribeFileBtn.disabled = false;
+        this.transcribeFileBtn.innerHTML = '<span>开始转文字</span>';
+        
+        // 显示停止状态
+        this.showStatus('⏹️ 处理已停止', 'warning');
+    }
+
     processStreamData(newData) {
         if (this.isAborted || !newData || !this.isTranscribing) return;
         
-        // 将新数据分割成行
         const lines = newData.split('\n');
         let currentLine = '';
         
@@ -459,21 +934,13 @@ export class FileAnalyzer {
             if (!line) continue;
             
             try {
-                // 尝试解析JSON
                 const result = JSON.parse(line);
-                
-                // 生成唯一消息ID避免重复处理
-                const messageId = result.message_id || 
-                                (result.type === 'segment_result' ? `seg-${result.segment_index}-${result.sub_segment_index || 0}` : null) ||
-                                `${result.type}-${Date.now()}`;
-                
-                // 检查是否已处理过此消息
+                const messageId = this.generateMessageId(result);
                 if (!this.processedMessageIds.has(messageId)) {
                     this.processedMessageIds.add(messageId);
                     this.handleStreamMessage(result);
                 }
             } catch (e) {
-                // 可能是不完整的JSON，累积到下一次处理
                 if (line.startsWith('{') && !line.endsWith('}')) {
                     currentLine = line;
                 } else if (currentLine && !line.endsWith('}')) {
@@ -482,7 +949,7 @@ export class FileAnalyzer {
                     currentLine += line;
                     try {
                         const result = JSON.parse(currentLine);
-                        const messageId = result.message_id || `${result.type}-${Date.now()}`;
+                        const messageId = this.generateMessageId(result);
                         if (!this.processedMessageIds.has(messageId)) {
                             this.processedMessageIds.add(messageId);
                             this.handleStreamMessage(result);
@@ -492,11 +959,15 @@ export class FileAnalyzer {
                         console.warn('处理不完整JSON失败:', currentLine, err);
                         currentLine = '';
                     }
-                } else {
-                    console.debug('跳过非JSON行:', line);
                 }
             }
         }
+    }
+
+    generateMessageId(result) {
+        return result.message_id || 
+               (result.type === 'segment_result' ? `seg-${result.segment_index}-${result.sub_segment_index || 0}` : null) ||
+               `${result.type}-${Date.now()}`;
     }
 
     calculateUploadSpeed(bytes, durationMs) {
@@ -534,36 +1005,35 @@ export class FileAnalyzer {
     handleTranscriptionError(error) {
         this.isAborted = true;
         
-        if (error.name === 'AbortError' || error.message.includes('中止')) {
+        if (error.message.includes('中止') || error.message.includes('abort')) {
             this.showStatus('⏹️ 处理已停止', 'warning');
         } else {
             this.showStatus(`❌ 处理失败: ${error.message}`, 'error');
             this.fileTranscript.innerHTML = `
-                <div style="padding: 20px; background: #fef2f2; border: 1px solid #fecaca; border-radius: 8px;">
-                    <h3 style="color: #ef4444; margin-top: 0;">处理失败</h3>
-                    <p style="color: #b91c1c; margin: 10px 0;">${error.message}</p>
-                    <p style="color: #6b7280; font-size: 0.9em;">
-                        建议：尝试<a href="#" onclick="event.preventDefault(); document.getElementById('uploadArea').click()" style="color:#3b82f6; text-decoration:underline">重新上传</a> 或 <a href="#" onclick="event.preventDefault(); location.reload()" style="color:#3b82f6; text-decoration:underline">刷新页面</a>
+                <div class="error-container" style="padding: 25px; background: #fef2f2; border: 1px solid #fecaca; border-radius: var(--rounded-xl);">
+                    <h3 style="color: var(--error-color); margin-top: 0; font-size: 1.8rem;">处理失败</h3>
+                    <p style="color: var(--error-dark); margin: 15px 0; font-size: 1.1rem; line-height: 1.6;">${error.message}</p>
+                    <p style="color: var(--gray-600); font-size: 0.95rem; margin-top: 20px;">
+                        建议：尝试<a href="#" style="color: var(--primary-color); text-decoration: underline; font-weight: 600;" onclick="event.preventDefault(); document.getElementById('uploadArea').click()">重新上传</a> 或 <a href="#" style="color: var(--primary-color); text-decoration: underline; font-weight: 600;" onclick="event.preventDefault(); location.reload()">刷新页面</a>
                     </p>
                 </div>
             `;
             this.fileTranscript.classList.remove('processing');
         }
         
-        this.finalizeTranscription(false); // 标记为异常完成
+        this.finalizeTranscription(false);
     }
 
     finalizeTranscription(isSuccess = true) {
-        // 确保只调用一次
         if (!this.isTranscribing) return;
         
         this.isTranscribing = false;
-        this.isAborted = true; // 确保不再处理新数据
+        this.isAborted = true;
         
-        // 确保进度条更新到100%
+        // 确保进度条到100%
         this.updateProgress(100, isSuccess ? '处理完成' : '处理已停止');
         
-        // 更新UI状态
+        // 重置按钮状态
         this.transcribeFileBtn.disabled = false;
         this.transcribeFileBtn.innerHTML = '<span>开始转文字</span>';
         this.setVisibility(this.uploadLoading, false);
@@ -574,7 +1044,10 @@ export class FileAnalyzer {
             this.showStatus(`💡 提示: 音频已优化 (${this.formatFileSize(this.originalFile.size)} → ${this.formatFileSize(this.currentFile.size)})`, 'info');
         }
         
-        this.fileTranscript.scrollIntoView({ behavior: 'smooth' });
+        // 滚动到结果
+        if (this.fileTranscript) {
+            this.fileTranscript.scrollIntoView({ behavior: 'smooth' });
+        }
     }
 
     resetUIForNewTranscription() {
@@ -582,12 +1055,11 @@ export class FileAnalyzer {
         this.setVisibility(this.progressContainer, true);
         
         this.fileTranscript.innerHTML = `
-            <div style="text-align: center; padding: 20px;">
-                <div class="loading" style="display: inline-block; margin-bottom: 15px;"></div>
-                <div style="font-size: 1.2rem; font-weight: 500; color: #374151;">
-                    准备开始处理...
-                </div>
-                <div id="uploadSpeedInfo" style="font-size: 0.9rem; color: #6b7280; margin-top: 8px;"></div>
+            <div class="processing-container">
+                <div class="processing-icon">🎙️</div>
+                <div class="processing-title">正在处理音频文件</div>
+                <div class="processing-subtitle">语音识别进行中，请稍候...</div>
+                <div class="upload-speed" id="uploadSpeedInfo">准备开始上传...</div>
             </div>
         `;
         this.fileTranscript.classList.add('processing');
@@ -596,25 +1068,20 @@ export class FileAnalyzer {
     }
 
     updateProgress(percent, message = '') {
-        // 确保进度不超过100%
         const displayPercent = Math.min(100, percent);
         
         if (this.progressFill) {
             this.progressFill.style.width = `${displayPercent}%`;
-            // 根据进度阶段选择不同颜色
+            
             if (displayPercent <= 50) {
-                // 上传阶段 - 蓝色
-                this.progressFill.style.background = 'linear-gradient(90deg, #3b82f6 0%, #60a5fa 100%)';
+                this.progressFill.style.background = 'linear-gradient(90deg, var(--primary-color) 0%, var(--primary-dark) 100%)';
             } else if (displayPercent < 100) {
-                // 处理阶段 - 绿色
-                this.progressFill.style.background = 'linear-gradient(90deg, #10b981 0%, #34d399 100%)';
+                this.progressFill.style.background = 'linear-gradient(90deg, var(--success-color) 0%, var(--success-dark) 100%)';
             } else {
-                // 完成阶段 - 深绿色
-                this.progressFill.style.background = 'linear-gradient(90deg, #059669 0%, #047857 100%)';
+                this.progressFill.style.background = 'linear-gradient(90deg, var(--success-dark) 0%, #047857 100%)';
             }
         }
         
-        // 更新状态消息
         if (message.includes('速度:')) {
             const speedEl = this.fileTranscript.querySelector('#uploadSpeedInfo');
             if (speedEl) speedEl.textContent = message;
@@ -646,15 +1113,10 @@ export class FileAnalyzer {
 
         summaryItems.forEach(item => {
             const itemDiv = document.createElement('div');
-            Object.assign(itemDiv.style, {
-                backgroundColor: '#f8fafc',
-                padding: '10px',
-                borderRadius: '8px',
-                border: '1px solid #e2e8f0'
-            });
+            itemDiv.className = 'summary-card';
             itemDiv.innerHTML = `
-                <div style="font-size: 0.85em; color: #6b7280; margin-bottom: 4px;">${item.label}</div>
-                <div style="font-weight: bold; font-size: 1.1em; color: #1f2937;">${item.value}</div>
+                <div class="summary-label">${item.label}</div>
+                <div class="summary-value">${item.value}</div>
             `;
             summaryContent.appendChild(itemDiv);
         });
@@ -668,56 +1130,44 @@ export class FileAnalyzer {
         const combinedContent = this.$('combinedContent');
         if (!combinedContent) return;
 
-        // 计算语音长度
         let duration = 0;
-        if (segmentInfo && segmentInfo.start_time !== undefined && segmentInfo.end_time !== undefined) {
-            duration = (segmentInfo.end_time - segmentInfo.start_time).toFixed(2);
+        let startTime = 0;
+        let endTime = 0;
+        
+        if (segmentInfo) {
+            if (segmentInfo.start_time !== undefined && segmentInfo.end_time !== undefined) {
+                duration = (segmentInfo.end_time - segmentInfo.start_time).toFixed(2);
+                startTime = segmentInfo.start_time.toFixed(2);
+                endTime = segmentInfo.end_time.toFixed(2);
+            }
         }
 
         let segmentHtml = '';
         
-        // 长段特殊样式
         if (segmentInfo && segmentInfo.is_long_segment) {
             segmentHtml = `
-                <div class="long-segment-container" style="margin: 20px 0; border: 2px solid #f59e0b; border-radius: 12px; overflow: hidden; box-shadow: 0 3px 10px rgba(245, 158, 11, 0.2);">
-                    <div style="background: linear-gradient(to right, #fffbeb 0%, #fef3c7 100%); padding: 14px 18px; display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #fed7aa;">
-                        <div style="display: flex; align-items: center; gap: 10px;">
-                            <span style="background: #f59e0b; color: white; width: 28px; height: 28px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-weight: bold; flex-shrink: 0; font-size: 1.1rem;">🔊</span>
-                            <strong style="color: #854d0e; font-size: 1.15rem; font-weight: 600;">长语音段 #${segmentInfo.segment_index}</strong>
-                        </div>
-                        <span style="background: #fef3c7; color: #854d0e; padding: 4px 12px; border-radius: 20px; font-weight: 600; font-size: 1rem; min-width: 70px; text-align: center;">
-                            ${duration}s
-                        </span>
+                <div class="long-segment-line">
+                    <div class="line-header">
+                        <span class="long-segment-index">长 #${segmentInfo.segment_index}</span>
+                        <span class="long-audio-position">[${startTime}-${endTime}s]</span>
                     </div>
-                    <div style="padding: 18px; background: white;">
-                        <div style="line-height: 1.7; font-size: 1.15rem; color: #1f2937; margin-bottom: 10px; font-weight: 500;">${text}</div>
-                        <div style="font-size: 0.88em; color: #854d0e; display: flex; justify-content: space-between; padding-top: 8px; border-top: 1px solid #fef3c7;">
-                            <span style="font-weight: 500;">⏱️ 时间范围: [${segmentInfo.start_time.toFixed(2)}s - ${segmentInfo.end_time.toFixed(2)}s]</span>
-                        </div>
-                    </div>
+                    <div class="long-segment-content">${text}</div>
                 </div>
             `;
         } 
-        // 普通段落样式
         else if (segmentInfo) {
             segmentHtml = `
-                <div class="transcript-paragraph" style="margin: 16px 0; padding: 14px 18px; border-radius: 10px; background: #f8fafc; border-left: 4px solid #3b82f6; box-shadow: 0 2px 5px rgba(0,0,0,0.03);">
-                    <div style="display: flex; justify-content: space-between; font-size: 0.88em; color: #374151; margin-bottom: 10px; font-weight: 500;">
-                        <span>段 #${segmentInfo.segment_index}</span>
-                        <span style="background: #dbeafe; color: #1e40af; padding: 3px 10px; border-radius: 15px; font-weight: 600;">
-                            ${duration}s
-                        </span>
+                <div class="transcript-line">
+                    <div class="line-header">
+                        <span class="segment-index">#${segmentInfo.segment_index}</span>
+                        <span class="audio-position">[${startTime}-${endTime}s]</span>
                     </div>
-                    <div style="line-height: 1.65; font-size: 1.08rem; color: #1e293b; font-weight: 500;">${text}</div>
-                    <div style="font-size: 0.83em; color: #4b5563; margin-top: 8px; display: flex; justify-content: space-between; padding-top: 6px; border-top: 1px dashed #bfdbfe;">
-                        <span>🕒 [${segmentInfo.start_time.toFixed(2)}s - ${segmentInfo.end_time.toFixed(2)}s]</span>
-                    </div>
+                    <div class="segment-content">${text}</div>
                 </div>
             `;
         } 
-        // 无信息的普通文本
         else {
-            segmentHtml = `<div style="margin: 16px 0; line-height: 1.65; font-size: 1.08rem;">${text}</div>`;
+            segmentHtml = `<div style="padding: 8px 12px; margin: 4px 0; background: var(--gray-100); border-radius: var(--rounded-md);">${text}</div>`;
         }
 
         combinedContent.insertAdjacentHTML('beforeend', segmentHtml);
@@ -726,14 +1176,30 @@ export class FileAnalyzer {
     }
 
     stopTranscription() {
-        if (this.isTranscribing && !this.isAborted) {
-            this.isAborted = true;
-            if (this.abortController) {
-                this.abortController.abort();
-            }
-            this.showStatus('⏹️ 正在停止处理...', 'warning');
-            this.setVisibility(this.stopTranscribeBtn, false);
+        if (!this.isTranscribing || this.isAborted) {
+            console.log('停止按钮被点击，但当前没有活动的转录任务');
+            return;
         }
+
+        console.log('停止按钮被点击，开始中止转录...');
+        
+        this.isAborted = true;
+        
+        if (this.abortController) {
+            console.log('调用abortController.abort()');
+            this.abortController.abort();
+            // 不重置abortController，让onabort事件处理
+        }
+        
+        if (this.xhr) {
+            console.log('调用xhr.abort()');
+            this.xhr.abort();
+            // this.xhr = null; // 不要立即重置，让onabort事件处理
+        }
+        
+        this.showStatus('⏹️ 正在停止处理...', 'warning');
+        this.setVisibility(this.stopTranscribeBtn, false);
+        this.transcribeFileBtn.disabled = true;
     }
 
     handleInitialization(result) {
@@ -746,7 +1212,7 @@ export class FileAnalyzer {
     }
 
     handleSegmentsSummary(result) {
-        if (self.isAborted) return;
+        if (this.isAborted) return;
         
         this.showStatus(`🎯 检测到 ${result.total_segments} 个语音段，开始转录...`, 'info');
         this.updateProgress(10, `开始处理 ${result.total_segments} 个段`);
@@ -755,7 +1221,6 @@ export class FileAnalyzer {
     handleSegmentResult(result) {
         if (this.isAborted) return;
         
-        // 更新进度，限制在50-99%之间
         const progressPercent = Math.min(99, 50 + (result.progress * 0.49));
         this.updateProgress(progressPercent, `处理中: 段 #${result.segment_index}/${result.total_segments}`);
         
@@ -766,7 +1231,6 @@ export class FileAnalyzer {
             );
         }
 
-        // 长段落处理
         if (result.is_long_segment) {
             const key = `long-${result.original_index}`;
             
@@ -782,7 +1246,6 @@ export class FileAnalyzer {
             
             const longSegmentData = this.segmentsMap.get(key);
             
-            // 添加子段，避免重复
             const existingSegment = longSegmentData.segments.find(s => s.sub_segment_index === result.sub_segment_index);
             if (!existingSegment) {
                 longSegmentData.segments.push({
@@ -792,18 +1255,13 @@ export class FileAnalyzer {
                     end_time: result.end_time
                 });
                 
-                // 更新结束时间
                 if (result.end_time > longSegmentData.end_time) {
                     longSegmentData.end_time = result.end_time;
                 }
             }
             
-            // 检查是否所有子段都已收到
             if (longSegmentData.segments.length >= longSegmentData.totalSubSegments) {
-                // 按子段索引排序
                 longSegmentData.segments.sort((a, b) => a.sub_segment_index - b.sub_segment_index);
-                
-                // 合并文本
                 const combinedText = longSegmentData.segments.map(s => s.text.trim()).filter(t => t).join(' ').trim();
                 
                 if (combinedText) {
@@ -815,11 +1273,9 @@ export class FileAnalyzer {
                     });
                 }
                 
-                // 清理
                 this.segmentsMap.delete(key);
             }
         } else {
-            // 普通段落
             this.appendToCombinedTranscript(result.text || '（无文本）', {
                 segment_index: result.segment_index,
                 start_time: result.start_time,
@@ -830,7 +1286,6 @@ export class FileAnalyzer {
 
     handleSegmentError(result) {
         if (this.isAborted) return;
-        
         this.showStatus(`❌ 段 #${result.segment_index} 失败: ${result.error}`, 'error');
     }
 
@@ -850,15 +1305,16 @@ export class FileAnalyzer {
         });
 
         this.fileTranscript.innerHTML = `
-            <div style="padding: 25px; text-align: center; background: linear-gradient(135deg, #f0fdf4 0%, #ecfdf5 100%); border-radius: 16px; border: 1px solid #bbf7d0;">
-                <div style="font-size: 4rem; margin-bottom: 15px; color: #10b981;">✓</div>
-                <h2 style="color: #065f46; margin-bottom: 12px; font-size: 1.8rem;">转录已完成</h2>
-                <p style="font-size: 1.1rem; color: #166534; margin-bottom: 20px;">
-                    完整转录结果和处理摘要已在下方显示
+            <div class="completion-container">
+                <div class="completion-icon">🎉</div>
+                <h2 class="completion-title">转录完成</h2>
+                <p class="completion-text">
+                    全部 ${result.total_segments} 个语音段已成功转录！
+                    <br>
+                    请点击下方按钮查看完整转录内容
                 </p>
-                <button onclick="document.getElementById('combinedTranscript').scrollIntoView({behavior: 'smooth'})" 
-                        style="margin-top: 12px; background: #10b981; color: white; border: none; padding: 10px 28px; border-radius: 10px; cursor: pointer; font-weight: 600; font-size: 1.05rem; transition: all 0.2s; box-shadow: 0 3px 8px rgba(16, 185, 129, 0.4);">
-                        查看完整转录
+                <button class="view-btn" onclick="document.getElementById('combinedTranscript').scrollIntoView({behavior: 'smooth'})">
+                    📋 查看完整转录
                 </button>
             </div>
         `;
@@ -866,7 +1322,6 @@ export class FileAnalyzer {
         
         this.showStatus(`🎉 转录完成！${(result.successful_segments || result.total_segments)}/${result.total_segments} 段成功`, 'success');
         
-        // 异步更新进度条到100%
         setTimeout(() => {
             if (!this.isAborted) {
                 this.updateProgress(100, '处理完成');
@@ -874,4 +1329,23 @@ export class FileAnalyzer {
             }
         }, 500);
     }
+
+    $(id) {
+        return document.getElementById(id);
+    }
+
+    // 快捷属性访问器
+    get uploadArea() { return this.elements.uploadArea; }
+    get uploadLoading() { return this.elements.uploadLoading; }
+    get fileInfo() { return this.elements.fileInfo; }
+    get fileNameEl() { return this.elements.fileName; }
+    get fileSizeEl() { return this.elements.fileSize; }
+    get transcribeFileBtn() { return this.elements.transcribeFileBtn; }
+    get progressContainer() { return this.elements.progressContainer; }
+    get progressFill() { return this.elements.progressFill; }
+    get fileTranscript() { return this.elements.fileTranscript; }
+    get statusMessage() { return this.elements.statusMessage; }
+    get stopTranscribeBtn() { return this.elements.stopTranscribeBtn; }
+    get summaryContainer() { return this.elements.summaryContainer; }
+    get combinedTranscript() { return this.elements.combinedTranscript; }
 }
