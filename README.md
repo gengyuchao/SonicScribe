@@ -8,6 +8,13 @@
 
 ---
 
+## 🌐 Language Versions
+
+- [中文版 README](README.md)
+- [English version README](README-en.md)
+
+---
+
 ## 🧩 项目概述
 
 SonicScribe 是一个基于 **GLM-ASR-Nano-2512** 模型的 Web 原生实时语音转文字系统，采用前后端分离架构，支持低延迟、高准确率的语音识别服务。适用于会议记录、讲座整理、访谈笔记、日常对话等多种场景。
@@ -118,7 +125,7 @@ npm run dev -- --port 8080
 | `VAD_SPEECH_THRESHOLD` | `0.6` | VAD 语音检测阈值（越低越敏感） |
 | `MAX_SEGMENT_DURATION` | `20.0` | 单个语音段最大持续时间（秒） |
 
-> 💡 建议使用 GPU（至少 4GB 显存）以获得最佳性能。
+> 💡 建议使用 GPU（至少 6GB 显存）以获得最佳性能。
 
 > 💡 注意前后端的端口设计端口不同，请根据实际应用设置。
 
@@ -126,9 +133,31 @@ npm run dev -- --port 8080
 
 ## 📦 项目限制
 
-- 长音频上传时间会很长。
 - 支持音频格式：WAV、MP3、FLAC、M4A、OGG、WebM。
 - 浏览器支持：需支持 Web Audio API 与 WebSocket 的现代浏览器（Chrome、Firefox、Edge）。
+
+## 🔐 SSL 证书生成
+
+项目已提供便捷脚本用于生成自签名 SSL 证书：
+
+1. 进入证书目录：
+   ```bash
+   cd certs
+   ```
+
+2. 执行生成脚本：
+   ```bash
+   chmod +x generate_cert.sh
+   ./generate_cert.sh
+   ```
+
+3. 生成的文件包括：
+   - `cert.pem` - 证书文件
+   - `key.pem` - 私钥文件
+
+4. 使用说明：
+   - 自签名证书需要在浏览器中手动信任
+   - 生产环境请使用 Let's Encrypt 或商业证书
 
 ---
 
