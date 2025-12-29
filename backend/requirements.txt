@@ -9,3 +9,4 @@ ffmpeg-python==0.2.0
 python-multipart==0.0.21
 websockets==15.0.1
 webrtcvad==2.0.10
+git+https://github.com/huggingface/transformers

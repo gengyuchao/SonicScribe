@@ -1,152 +1,186 @@
+import os
+import tempfile
+from pathlib import Path
+from typing import Union, Dict, Any
+
+import numpy as np
+import soundfile as sf
 import torch
+import torchaudio
 from transformers import (
     AutoConfig,
-    AutoModelForCausalLM,
-    AutoTokenizer,
-    WhisperFeatureExtractor,
+    AutoModel,
+    AutoProcessor,
 )
-from pathlib import Path
-import numpy as np
-import torchaudio
 
-WHISPER_FEAT_CFG = {
-    "chunk_length": 30,
-    "feature_extractor_type": "WhisperFeatureExtractor",
-    "feature_size": 128,
-    "hop_length": 160,
-    "n_fft": 400,
-    "n_samples": 480000,
-    "nb_max_frames": 3000,
-    "padding_side": "right",
-    "padding_value": 0.0,
-    "processor_class": "WhisperProcessor",
-    "return_attention_mask": False,
-    "sampling_rate": 16000,
-}
-
-def get_audio_token_length(seconds, merge_factor=2):
-    def get_T_after_cnn(L_in, dilation=1):
-        for padding, kernel_size, stride in [(1,3,1)] + [(1,3,2)]:
-            L_out = L_in + 2 * padding - dilation * (kernel_size - 1) - 1
-            L_out = 1 + L_out // stride
-            L_in = L_out
-        return L_out
-    mel_len = int(seconds * 100)
-    audio_len_after_cnn = get_T_after_cnn(mel_len)
-    audio_token_num = (audio_len_after_cnn - merge_factor) // merge_factor + 1
-    audio_token_num = min(audio_token_num, 1500 // merge_factor)
-    return audio_token_num
-
-def build_prompt(
-    audio_tensor,
-    tokenizer,
-    feature_extractor,
-    merge_factor,
-    sampling_rate=16000,
-) -> dict:
-    # 处理音频张量
-    wav = audio_tensor[:1, :]  # 只取单声道
-    
-    # 重采样到目标采样率
-    if sampling_rate != feature_extractor.sampling_rate:
-        wav = torchaudio.transforms.Resample(sampling_rate, feature_extractor.sampling_rate)(wav)
-    
-    tokens = []
-    tokens += tokenizer.encode("<|user|>")
-    tokens += tokenizer.encode("\n")
-    
-    audios = []
-    audio_offsets = []
-    audio_length = []
-    
-    # 处理整个音频
-    mel = feature_extractor(
-        wav.numpy(),
-        sampling_rate=feature_extractor.sampling_rate,
-        return_tensors="pt",
-        padding="max_length",
-    )["input_features"]
-    audios.append(mel)
-    
-    seconds = wav.shape[1] / feature_extractor.sampling_rate
-    num_tokens = get_audio_token_length(seconds, merge_factor)
-    tokens += tokenizer.encode("<|begin_of_audio|>")
-    audio_offsets.append(len(tokens))
-    tokens += [0] * num_tokens
-    tokens += tokenizer.encode("<|end_of_audio|>")
-    audio_length.append(num_tokens)
-    
-    # 添加提示文本
-    tokens += tokenizer.encode("<|user|>")
-    tokens += tokenizer.encode("\nPlease transcribe this audio into text")
-    tokens += tokenizer.encode("<|assistant|>")
-    tokens += tokenizer.encode("\n")
-    
-    batch = {
-        "input_ids": torch.tensor([tokens], dtype=torch.long),
-        "audios": torch.cat(audios, dim=0),
-        "audio_offsets": [audio_offsets],
-        "audio_length": [audio_length],
-        "attention_mask": torch.ones(1, len(tokens), dtype=torch.long),
-    }
-    return batch
 
 class ASRModel:
-    def __init__(self, checkpoint_dir, device="cuda"):
+    def __init__(self, checkpoint_dir: str, device: str = "cuda"):
+        """
+        初始化 ASR 模型。
+        
+        Args:
+            checkpoint_dir: 模型检查点目录路径。
+            device: 运行设备 ("cuda" 或 "cpu")。
+        """
+        # 确定设备和 device_map 策略
         self.device = torch.device(device if torch.cuda.is_available() else "cpu")
+        # 对于 transformers，device_map 通常期望字符串或字典，而不是 torch.device 对象
+        device_map = "auto" if self.device.type == "cuda" else "cpu"
+        
         self.checkpoint_dir = Path(checkpoint_dir)
+        self.model_dtype = torch.bfloat16
         
-        # 加载tokenizer
-        self.tokenizer = AutoTokenizer.from_pretrained(str(self.checkpoint_dir))
+        # 加载 Processor
+        self.processor = AutoProcessor.from_pretrained(str(self.checkpoint_dir))
+        self.target_sr = self.processor.feature_extractor.sampling_rate
         
-        # 加载特征提取器
-        self.feature_extractor = WhisperFeatureExtractor(**WHISPER_FEAT_CFG)
-        
-        # 加载模型配置
+        # 加载配置
         self.config = AutoConfig.from_pretrained(self.checkpoint_dir, trust_remote_code=True)
         
         # 加载模型
-        self.model = AutoModelForCausalLM.from_pretrained(
+        self.model = AutoModel.from_pretrained(
             self.checkpoint_dir,
-            config=self.config,
-            torch_dtype=torch.bfloat16,
+            torch_dtype=self.model_dtype,
+            device_map=device_map,
             trust_remote_code=True,
         )
-        self.model = self.model.to(self.device)
         self.model.eval()
-    
-    def transcribe(self, audio_tensor, sampling_rate=16000, max_new_tokens=128):
-        with torch.no_grad():
-            batch = build_prompt(
-                audio_tensor,
-                self.tokenizer,
-                self.feature_extractor,
-                merge_factor=self.config.merge_factor,
-                sampling_rate=sampling_rate
-            )
-            
-            model_inputs, prompt_len = self.prepare_inputs(batch)
-            
-            generated = self.model.generate(
-                **model_inputs,
-                max_new_tokens=max_new_tokens,
-                do_sample=False,
-            )
-            
-            transcript_ids = generated[0, prompt_len:].cpu().tolist()
-            transcript = self.tokenizer.decode(transcript_ids, skip_special_tokens=True).strip()
-            return transcript
-    
-    def prepare_inputs(self, batch):
-        tokens = batch["input_ids"].to(self.device)
-        attention_mask = batch["attention_mask"].to(self.device)
-        audios = batch["audios"].to(self.device)
+
+    def _prepare_audio_tempfile(self, audio_tensor: torch.Tensor, sampling_rate: int) -> str:
+        """
+        预处理音频张量并保存到临时 WAV 文件。
         
-        model_inputs = {
-            "inputs": tokens,
-            "attention_mask": attention_mask,
-            "audios": audios.to(torch.bfloat16),
-            "audio_offsets": batch["audio_offsets"],
-            "audio_length": batch["audio_length"],
-        }
-        return model_inputs, tokens.size(1)
+        处理流程：
+        1. 确保单声道。
+        2. 重采样至目标采样率。
+        3. 归一化。
+        4. 保存至临时文件。
+        
+        Args:
+            audio_tensor: 输入音频张量 (Channel, Time) 或。
+            sampling_rate: 原始采样率。
+            
+        Returns:
+            临时文件的绝对路径。
+        """
+        # 处理 1D 输入 -> 2D (1, N)
+        if audio_tensor.dim() == 1:
+            audio_tensor = audio_tensor.unsqueeze(0)
+            
+        # 取单声道 (如果输入是多声道，取第一声道)
+        wav = audio_tensor[:1, :]
+
+        # 重采样 (如果采样率不匹配)
+        if sampling_rate != self.target_sr:
+            # 每次实例化 Resample 可能会有开销，但能动态适应不同输入采样率
+            resampler = torchaudio.transforms.Resample(
+                orig_freq=sampling_rate, 
+                new_freq=self.target_sr
+            )
+            wav = resampler(wav)
+
+        # 归一化 (保持原逻辑：避免除零，并归一化到 [-1, 1])
+        # 注意：这会改变音频的绝对响度，但保持相对动态范围
+        max_val = torch.max(torch.abs(wav))
+        if max_val > 1e-6:
+            wav = wav / max_val
+            
+        # 创建临时文件
+        # 使用 delete=False，因为我们需要在上下文之外由 processor 读取它
+        # 文件将在 transcribe 结束时手动删除
+        fd, tmp_path = tempfile.mkstemp(suffix='.wav')
+        os.close(fd) # 关闭文件描述符，让 soundfile 可以打开它
+        
+        # 保存音频
+        sf.write(tmp_path, wav.squeeze(0).cpu().numpy(), self.target_sr)
+        
+        return tmp_path
+
+    def _prepare_model_inputs(self, inputs: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        准备模型输入数据，确保张量位于正确的设备和拥有正确的精度。
+        """
+        prepared_inputs = {}
+        for key, value in inputs.items():
+            if isinstance(value, torch.Tensor):
+                # input_ids 和 attention_mask 必须是 long 类型
+                if key in ("input_ids", "attention_mask"):
+                    prepared_inputs[key] = value.to(self.device, dtype=torch.long)
+                # 其他浮点张量 (如 audios) 转换为模型精度
+                elif value.is_floating_point():
+                    prepared_inputs[key] = value.to(self.device, dtype=self.model_dtype)
+                else:
+                    prepared_inputs[key] = value.to(self.device)
+            else:
+                prepared_inputs[key] = value
+        return prepared_inputs
+
+    def transcribe(
+        self, 
+        audio_tensor: torch.Tensor, 
+        sampling_rate: int = 16000, 
+        max_new_tokens: int = 128
+    ) -> str:
+        """
+        执行语音识别转录。
+        
+        Args:
+            audio_tensor: 输入音频张量。
+            sampling_rate: 音频采样率。
+            max_new_tokens: 最大生成的 token 数量。
+            
+        Returns:
+            转录后的文本字符串。
+        """
+        temp_audio_path = None
+        try:
+            # 1. 预处理音频并获取临时文件路径
+            temp_audio_path = self._prepare_audio_tempfile(audio_tensor, sampling_rate)
+
+            # 2. 构建符合 chat template 格式的消息
+            messages = [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "audio", "url": temp_audio_path},
+                        {"type": "text", "text": "Please transcribe this audio into text"},
+                    ],
+                }
+            ]
+
+            # 3. 应用 chat template 并转换为张量
+            inputs = self.processor.apply_chat_template(
+                messages,
+                tokenize=True,
+                add_generation_prompt=True,
+                return_dict=True,
+                return_tensors="pt"
+            )
+
+            # 4. 转换数据类型并移动到设备
+            inputs = self._prepare_model_inputs(inputs)
+
+            input_length = inputs["input_ids"].shape[1]
+
+            # 5. 推理生成
+            with torch.no_grad():
+                outputs = self.model.generate(
+                    **inputs,
+                    max_new_tokens=max_new_tokens,
+                    do_sample=False,
+                )
+
+            # 6. 解码结果
+            generated_tokens = outputs[:, input_length:]
+            transcript = self.processor.batch_decode(
+                generated_tokens,
+                skip_special_tokens=True
+            )[0].strip()
+
+            return transcript
+
+        finally:
+            # 7. 清理临时文件 (确保无论是否出错都执行)
+            if temp_audio_path and os.path.exists(temp_audio_path):
+                os.unlink(temp_audio_path)
