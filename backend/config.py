@@ -28,6 +28,14 @@ class AppConfig:
     VAD_SMOOTHING_WINDOW = 2  # VAD平滑窗口大小
     VAD_SPEECH_THRESHOLD = 0.6  # 语音活动阈值
     VAD_PROCESS_WINDOW = 10  # 语音活动窗口大小
+    
+    # ====== VAD 动态阈值配置 ======
+    VAD_INITIAL_THRESHOLD = 0.3    # 初始阈值
+    VAD_THRESHOLD_MIN = 0.3        # 最小阈值
+    VAD_THRESHOLD_MAX = 0.9        # 最大阈值
+    VAD_THRESHOLD_STEP = 0.1      # 每次增加的步长
+    VAD_THRESHOLD_DECAY = 0.95     # 指数衰减系数（平滑过渡）
+    
     # 转录配置
     TEMPORARY_TRANSCRIPTION_INTERVAL = 20  # 每20个片段(1.28秒)进行临时转录
     MAX_SEGMENT_DURATION = 30.0  # 单个语音段最大30秒
