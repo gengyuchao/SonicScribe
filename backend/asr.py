@@ -1,7 +1,7 @@
 import os
 import tempfile
 from pathlib import Path
-from typing import Union, Dict, Any
+from typing import Union, Dict, Any, List, Optional
 
 import numpy as np
 import soundfile as sf
@@ -116,19 +116,53 @@ class ASRModel:
                 prepared_inputs[key] = value
         return prepared_inputs
 
+    def _format_hotwords_prompt(self, hotwords: List[str], max_hotwords: int = 10) -> str:
+        """
+        格式化热词提示语句
+        
+        Args:
+            hotwords: 热词列表
+            max_hotwords: 最大热词数量限制
+            
+        Returns:
+            格式化后的热词提示字符串
+        """
+        if not hotwords:
+            return ""
+        
+        # 清理和去重热词
+        cleaned_hotwords = [
+            hw.strip().lower() 
+            for hw in set(hotwords) 
+            if hw and isinstance(hw, str) and hw.strip()
+        ]
+        
+        if not cleaned_hotwords:
+            return ""
+        
+        # 限制热词数量
+        if len(cleaned_hotwords) > max_hotwords:
+            cleaned_hotwords = cleaned_hotwords[:max_hotwords]
+        
+        # 构建提示语句
+        hotwords_str = ", ".join(f'"{hw}"' for hw in cleaned_hotwords)
+        return f". Pay special attention to these important terms: {hotwords_str}"
+
     def transcribe(
         self, 
         audio_tensor: torch.Tensor, 
         sampling_rate: int = 16000, 
-        max_new_tokens: int = 128
+        max_new_tokens: int = 128,
+        hotwords: Optional[List[str]] = None
     ) -> str:
         """
-        执行语音识别转录。
+        执行语音识别转录，支持热词增强功能
         
         Args:
             audio_tensor: 输入音频张量。
             sampling_rate: 音频采样率。
             max_new_tokens: 最大生成的 token 数量。
+            hotwords: 需要特别关注的热词列表，例如 ["brand name", "product name"]
             
         Returns:
             转录后的文本字符串。
@@ -138,18 +172,25 @@ class ASRModel:
             # 1. 预处理音频并获取临时文件路径
             temp_audio_path = self._prepare_audio_tempfile(audio_tensor, sampling_rate)
 
-            # 2. 构建符合 chat template 格式的消息
+            # 2. 构建基础指令
+            base_instruction = "Please transcribe this audio into text"
+            
+            # 3. 添加热词提示（如果提供）
+            hotwords_prompt = self._format_hotwords_prompt(hotwords or [])
+            full_instruction = base_instruction + hotwords_prompt
+
+            # 4. 构建符合 chat template 格式的消息
             messages = [
                 {
                     "role": "user",
                     "content": [
                         {"type": "audio", "url": temp_audio_path},
-                        {"type": "text", "text": "Please transcribe this audio into text"},
+                        {"type": "text", "text": full_instruction},
                     ],
                 }
             ]
 
-            # 3. 应用 chat template 并转换为张量
+            # 5. 应用 chat template 并转换为张量
             inputs = self.processor.apply_chat_template(
                 messages,
                 tokenize=True,
@@ -158,12 +199,12 @@ class ASRModel:
                 return_tensors="pt"
             )
 
-            # 4. 转换数据类型并移动到设备
+            # 6. 转换数据类型并移动到设备
             inputs = self._prepare_model_inputs(inputs)
 
             input_length = inputs["input_ids"].shape[1]
 
-            # 5. 推理生成
+            # 7. 推理生成
             with torch.no_grad():
                 outputs = self.model.generate(
                     **inputs,
@@ -171,7 +212,7 @@ class ASRModel:
                     do_sample=False,
                 )
 
-            # 6. 解码结果
+            # 8. 解码结果
             generated_tokens = outputs[:, input_length:]
             transcript = self.processor.batch_decode(
                 generated_tokens,
@@ -181,6 +222,6 @@ class ASRModel:
             return transcript
 
         finally:
-            # 7. 清理临时文件 (确保无论是否出错都执行)
+            # 9. 清理临时文件 (确保无论是否出错都执行)
             if temp_audio_path and os.path.exists(temp_audio_path):
                 os.unlink(temp_audio_path)
