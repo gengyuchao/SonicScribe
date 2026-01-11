@@ -29,7 +29,7 @@ def asr_model_init() -> None:
         logger.warning("ASR model already initialized. Skipping re-initialization.")
         return
     
-    _asr_model = ASRModel(AppConfig.CHECKPOINT_PATH, device=AppConfig.DEVICE)
+    _asr_model = ASRModel(AppConfig.CHECKPOINT_PATH, device=AppConfig.DEVICE,mode="native")  # native or int8
 
 def vad_model_init() -> None:
     """
