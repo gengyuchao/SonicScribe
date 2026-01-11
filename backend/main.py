@@ -1,7 +1,7 @@
 import os
 import time
 from contextlib import asynccontextmanager
-from typing import Optional, Dict, Any, AsyncGenerator, List, Tuple, Deque
+from typing import Optional, Dict, Any, AsyncGenerator, List, Tuple, Deque, Union
 import asyncio
 import json
 import logging
@@ -11,10 +11,10 @@ import torch
 import numpy as np
 from collections import deque
 import uvicorn
-from fastapi import FastAPI, UploadFile, File, WebSocket, HTTPException
+from fastapi import FastAPI, UploadFile, File, WebSocket, HTTPException, Query, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from asr import ASRModel
 from vad import VADProcessor
 from vad_processor_manager import VADProcessorManager
@@ -25,6 +25,7 @@ from utils import convert_audio_to_wav, audiosegment_to_tensor, standardize_audi
 from dotenv import load_dotenv
 from models_manager import asr_model_init, vad_model_init, asr_model_get, vad_model_get
 from starlette.websockets import WebSocketDisconnect, WebSocketState
+import fastapi_cdn_host
 
 # 配置日志
 logging.basicConfig(
@@ -33,6 +34,11 @@ logging.basicConfig(
 )
 logger = logging.getLogger("speech-to-text")
 
+# ======================
+# 模型全局变量
+# ======================
+asr_model: Optional[ASRModel] = None
+vad_processor: Optional[VADProcessor] = None
 
 # ======================
 # 生命周期管理
@@ -84,12 +90,38 @@ async def _cleanup_resources():
     logger.info("✅ 资源清理完成")
 
 # ======================
+# 数据模型
+# ======================
+class VADConfig(BaseModel):
+    enabled: bool = True
+    speech_threshold: float = 0.6
+    silence_threshold: float = 0.3
+    smoothing_window: int = 2
+
+class TranscriptionConfig(BaseModel):
+    vad_enabled: bool = Field(
+        default=True,
+        description="是否启用VAD语音活动检测。禁用时将整个音频作为单个段处理"
+    )
+    hotwords: Optional[List[str]] = Field(
+        default=None,
+        description="需要特别关注的热词列表，例如 ['品牌名', '产品型号']",
+        examples=[["iPhone", "MacBook", "Apple Watch"]]
+    )
+    max_segment_duration: Optional[float] = Field(
+        default=None,
+        description="最大段时长（秒），超过此长度的音频将被分割。None表示使用系统默认值",
+        ge=1.0,
+        le=30.0
+    )
+
+# ======================
 # 应用初始化
 # ======================
 app = FastAPI(
     title="语音转文字API",
     description="基于FastAPI的语音转文字服务，支持实时对话和文件分析",
-    version="2.0.0",
+    version="2.1.0",
     lifespan=lifespan,
     docs_url="/docs",
     redoc_url="/redoc",
@@ -98,6 +130,8 @@ app = FastAPI(
         "email": "gengyuchao11@163.com"
     }
 )
+
+fastapi_cdn_host.patch_docs(app)
 
 # CORS 配置
 app.add_middleware(
@@ -109,44 +143,9 @@ app.add_middleware(
     expose_headers=["*"],
 )
 
-
-@app.get("/vad/status")
-async def get_vad_status():
-    """获取VAD处理器状态，用于调试"""
-    global vad_processor
-    
-    if not vad_processor:
-        return {"status": "error", "message": "VAD处理器未初始化"}
-    
-    status = {
-        "status": "active",
-        "processor_type": type(vad_processor).__name__,
-        "has_is_voice_active": hasattr(vad_processor, 'is_voice_active'),
-        "configuration": {
-            "speech_threshold": AppConfig.VAD_SPEECH_THRESHOLD,
-            "smoothing_window": AppConfig.VAD_SMOOTHING_WINDOW,
-        }
-    }
-    
-    # 尝试测试VAD处理器
-    try:
-        test_audio = torch.randn(1600) * 0.01  # 小幅随机噪声
-        is_speech = vad_processor.is_voice_active(test_audio)
-        status["test_is_speech"] = bool(is_speech)
-    except Exception as e:
-        status["test_error"] = str(e)
-    
-    return status
-
-
 # ======================
 # API 端点
 # ======================
-class VADConfig(BaseModel):
-    enabled: bool = True
-    speech_threshold: float = 0.6
-    silence_threshold: float = 0.3
-    smoothing_window: int = 2
 
 @app.get("/health")
 async def health_check():
@@ -154,13 +153,14 @@ async def health_check():
     return {
         "status": "ok",
         "service": "speech-to-text",
-        "version": "2.0.0",
+        "version": "2.1.0",
         "timestamp": time.time(),
         "models": {
             "asr_loaded": asr_model is not None,
             "vad_loaded": vad_processor is not None
         },
         "configuration": {
+            "default_max_segment_duration": AppConfig.MAX_SEGMENT_DURATION,
             "audio_chunk_duration_ms": AppConfig.AUDIO_CHUNK_DURATION_MS,
             "vad_smoothing_window": AppConfig.VAD_SMOOTHING_WINDOW,
             "max_audio_buffer_seconds": AppConfig.MAX_AUDIO_BUFFER_SECONDS,
@@ -185,24 +185,57 @@ async def get_config():
             "processing_interval_ms": AppConfig.VAD_PROCESSING_INTERVAL_MS
         },
         "transcription_configuration": {
+            "default_max_segment_duration": AppConfig.MAX_SEGMENT_DURATION,
             "temporary_interval_chunks": AppConfig.TEMPORARY_TRANSCRIPTION_INTERVAL,
-            "max_segment_duration": AppConfig.MAX_SEGMENT_DURATION,
         }
     }
-
 
 @app.post("/transcribe/file")
 async def transcribe_file(
     file: UploadFile = File(...),
-    stream: bool = True,
-    vad_enabled: bool = True
+    stream: bool = Query(
+        default=True,
+        description="是否启用流式响应"
+    ),
+    config_str: Optional[str] = Form(
+        None,
+        description="转录配置的JSON字符串，例如: {\"vad_enabled\": true, \"hotwords\": [\"iPhone\"], \"max_segment_duration\": 15}"
+    )
 ):
     """
-    优化版文件转文字接口（性能提升）
+    优化版文件转文字接口，支持热词和VAD/预分割模式
+    
+    Args:
+        file: 音频文件
+        stream: 是否流式返回结果
+        config_str: 转录配置的JSON字符串，包含vad_enabled, hotwords, max_segment_duration
     """
     if not asr_model or not vad_processor:
         logger.error("ASR 或 VAD 模型未加载")
         raise HTTPException(status_code=503, detail="模型未加载")
+    
+    # 解析配置
+    config = None
+    if config_str:
+        try:
+            config_dict = json.loads(config_str)
+            config = TranscriptionConfig(**config_dict)
+            logger.info(f"🔧 已解析配置: {config_dict}")
+        except json.JSONDecodeError as e:
+            logger.error(f"❌ JSON 解析失败: {str(e)}, 原始输入: {config_str}")
+            raise HTTPException(status_code=400, detail=f"无效的JSON格式: {str(e)}")
+        except Exception as e:
+            logger.error(f"❌ 配置验证失败: {str(e)}")
+            raise HTTPException(status_code=422, detail=f"配置验证失败: {str(e)}")
+    
+    # 应用默认配置
+    if config is None:
+        config = TranscriptionConfig()
+    
+    # 覆盖系统默认的最大段时长
+    effective_max_segment_duration = config.max_segment_duration or AppConfig.MAX_SEGMENT_DURATION
+    logger.info(f"🔧 使用配置 - VAD启用: {config.vad_enabled}, 热词: {config.hotwords}, "
+                f"最大段时长: {effective_max_segment_duration}s")
 
     try:
         logger.info(f"📁 处理文件上传: {file.filename}, 大小: {file.size} bytes")
@@ -240,8 +273,9 @@ async def transcribe_file(
         # === 优化2: 异步 VAD 处理 + 快速响应 ===
         async def get_segments():
             """异步获取语音段，尽快返回段信息"""
-            if not vad_enabled or total_duration < 1.0:  # 短音频不 VAD
-                logger.info("⚡ 短音频或 VAD 禁用，使用整个音频")
+            # 预分割模式：不使用VAD，直接按固定时长分割
+            if not config.vad_enabled:
+                logger.info(f"⚡ 预分割模式启用，最大段时长: {effective_max_segment_duration}s")
                 return [{
                     'original_index': 1,
                     'start_sample': 0,
@@ -249,7 +283,20 @@ async def transcribe_file(
                     'start_time': 0.0,
                     'end_time': total_duration,
                     'duration': total_duration,
-                    'is_long_segment': total_duration > AppConfig.MAX_SEGMENT_DURATION
+                    'is_long_segment': total_duration > effective_max_segment_duration
+                }]
+            
+            # VAD模式：检测语音活动
+            if total_duration < 1.0:  # 短音频不 VAD
+                logger.info("⚡ 短音频，跳过VAD检测")
+                return [{
+                    'original_index': 1,
+                    'start_sample': 0,
+                    'end_sample': total_samples,
+                    'start_time': 0.0,
+                    'end_time': total_duration,
+                    'duration': total_duration,
+                    'is_long_segment': total_duration > effective_max_segment_duration
                 }]
             
             try:
@@ -284,7 +331,7 @@ async def transcribe_file(
                                 'start_time': start_sample / sample_rate,
                                 'end_time': end_sample / sample_rate,
                                 'duration': duration,
-                                'is_long_segment': duration > AppConfig.MAX_SEGMENT_DURATION
+                                'is_long_segment': duration > effective_max_segment_duration
                             })
                     
                     if segments:
@@ -299,7 +346,7 @@ async def transcribe_file(
                     'start_time': 0.0,
                     'end_time': total_duration,
                     'duration': total_duration,
-                    'is_long_segment': total_duration > AppConfig.MAX_SEGMENT_DURATION
+                    'is_long_segment': total_duration > effective_max_segment_duration
                 }]
                 
             except Exception as e:
@@ -312,14 +359,20 @@ async def transcribe_file(
                     'start_time': 0.0,
                     'end_time': total_duration,
                     'duration': total_duration,
-                    'is_long_segment': total_duration > AppConfig.MAX_SEGMENT_DURATION
+                    'is_long_segment': total_duration > effective_max_segment_duration
                 }]
         
         # === 优化3: 尽快返回段信息，后台处理转录 ===
         raw_segments = await get_segments()
         
-        # 切割长段
-        final_segments = cut_long_segments(raw_segments, sample_rate, total_samples, total_duration)
+        # 切割长段 - 使用有效的最大段时长
+        final_segments = cut_long_segments(
+            raw_segments, 
+            sample_rate, 
+            total_samples, 
+            total_duration,
+            max_segment_duration=effective_max_segment_duration
+        )
         
         # 为所有段分配唯一索引
         for i, segment in enumerate(final_segments):
@@ -339,8 +392,11 @@ async def transcribe_file(
                 "file_size": len(file_content),
                 "total_duration": round(total_duration, 2),
                 "total_segments": total_segments,
-                "vad_enabled": vad_enabled,
-                "max_segment_duration": AppConfig.MAX_SEGMENT_DURATION,
+                "config": {
+                    "vad_enabled": config.vad_enabled,
+                    "hotwords": config.hotwords or [],
+                    "max_segment_duration": effective_max_segment_duration
+                },
                 "timestamp": time.time()
             }
             yield (json.dumps(init_message, ensure_ascii=False) + "\n").encode("utf-8")
@@ -377,7 +433,11 @@ async def transcribe_file(
                 async with semaphore:
                     segment = task['segment']
                     return await transcribe_single_segment(
-                        segment, full_audio_tensor, sample_rate
+                        segment, 
+                        full_audio_tensor, 
+                        sample_rate,
+                        hotwords=config.hotwords,
+                        max_new_tokens=256  # 可根据需要调整
                     )
             
             # 启动所有转录任务
@@ -416,7 +476,9 @@ async def transcribe_file(
                 "total_duration": round(total_duration, 2),
                 "processing_time": round(time.time() - start_time, 2),
                 "completed_at": time.time(),
-                "message": "转录完成"
+                "message": "转录完成",
+                "hotwords_used": config.hotwords or [],
+                "vad_enabled": config.vad_enabled
             }
             yield (json.dumps(final_summary, ensure_ascii=False) + "\n").encode("utf-8")
         
@@ -443,19 +505,27 @@ async def transcribe_file(
                 "filename": file.filename,
                 "file_size": len(file_content),
                 "total_duration": round(total_duration, 2),
+                "config": {
+                    "vad_enabled": config.vad_enabled,
+                    "hotwords": config.hotwords or [],
+                    "max_segment_duration": effective_max_segment_duration
+                },
                 "segments": segments_result,
                 "total_segments": len(segments_result),
                 "processing_time": round(time.time() - start_time, 2)
             }
     
+    except HTTPException:
+        # 重新抛出已知的HTTP异常
+        raise
     except Exception as e:
         logger.error(f"❌ 文件转录失败: {str(e)}\n{traceback.format_exc()}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=f"服务器内部错误: {str(e)}")
 
-# === 辅助方法（提取到类外部或保持为局部函数）===
+# === 辅助方法 ===
 
-def cut_long_segments(raw_segments, sample_rate, total_samples, total_duration):
-    """切割长音频段"""
+def cut_long_segments(raw_segments, sample_rate, total_samples, total_duration, max_segment_duration):
+    """切割长音频段，使用指定的最大段时长"""
     final_segments = []
     
     for raw_segment in raw_segments:
@@ -463,7 +533,7 @@ def cut_long_segments(raw_segments, sample_rate, total_samples, total_duration):
         start_sample = raw_segment['start_sample']
         end_sample = raw_segment['end_sample']
         
-        if duration <= AppConfig.MAX_SEGMENT_DURATION:
+        if duration <= max_segment_duration:
             final_segments.append({
                 **raw_segment,
                 'is_long_segment': False,
@@ -472,8 +542,8 @@ def cut_long_segments(raw_segments, sample_rate, total_samples, total_duration):
             })
         else:
             # 长段切割
-            num_sub_segments = int(np.ceil(duration / AppConfig.MAX_SEGMENT_DURATION))
-            samples_per_sub_segment = int(AppConfig.MAX_SEGMENT_DURATION * sample_rate)
+            num_sub_segments = int(np.ceil(duration / max_segment_duration))
+            samples_per_sub_segment = int(max_segment_duration * sample_rate)
             
             for sub_idx in range(num_sub_segments):
                 sub_start_sample = start_sample + sub_idx * samples_per_sub_segment
@@ -512,8 +582,14 @@ def get_segments_summary(segments, sample_rate):
         for seg in segments
     ]
 
-async def transcribe_single_segment(segment, full_audio_tensor, sample_rate):
-    """转录单个段（异步）"""
+async def transcribe_single_segment(
+    segment, 
+    full_audio_tensor, 
+    sample_rate,
+    hotwords: Optional[List[str]] = None,
+    max_new_tokens: int = 128
+):
+    """转录单个段（异步），支持热词"""
     segment_index = segment['segment_index']
     start_sample = segment['start_sample']
     end_sample = segment['end_sample']
@@ -539,7 +615,12 @@ async def transcribe_single_segment(segment, full_audio_tensor, sample_rate):
         loop = asyncio.get_event_loop()
         transcript = await loop.run_in_executor(
             None,
-            lambda: asr_model.transcribe(segment_tensor, sampling_rate=sample_rate)
+            lambda: asr_model.transcribe(
+                segment_tensor, 
+                sampling_rate=sample_rate,
+                max_new_tokens=max_new_tokens,
+                hotwords=hotwords  # 传递热词
+            )
         )
 
         return {
@@ -552,6 +633,7 @@ async def transcribe_single_segment(segment, full_audio_tensor, sample_rate):
             "text": transcript.strip(),
             "processing_time": 0,  # 真实时间在外部计算
             "is_long_segment": is_long_segment,
+            "hotwords_used": hotwords or [],
             "timestamp": time.time()
         }
         
@@ -567,18 +649,18 @@ async def transcribe_single_segment(segment, full_audio_tensor, sample_rate):
         }
 
 @app.post("/vad/config")
-async def update_vad_config(config: VADConfig):
+async def update_vad_config(new_config: VADConfig):
     """更新VAD配置"""
     try:
-        logger.info(f"⚙️ 更新 VAD 配置: {config}")
+        logger.info(f"⚙️ 更新 VAD 配置: {new_config}")
         
         # 更新全局配置
-        AppConfig.VAD_SPEECH_THRESHOLD = config.speech_threshold
-        AppConfig.VAD_SMOOTHING_WINDOW = config.smoothing_window
+        AppConfig.VAD_SPEECH_THRESHOLD = new_config.speech_threshold
+        AppConfig.VAD_SMOOTHING_WINDOW = new_config.smoothing_window
         
         return {
             "status": "success",
-            "config": config.model_dump(),
+            "config": new_config.model_dump(),
             "message": "VAD 配置更新成功"
         }
     except Exception as e:
@@ -649,13 +731,14 @@ async def websocket_audio(websocket: WebSocket):
                 "low_latency": True,
                 "vad_separation": True,
                 "chunk_based_processing": True,
-                "debug_audio": AppConfig.DEBUG_AUDIO_ENABLED
+                "debug_audio": AppConfig.DEBUG_AUDIO_ENABLED,
+                "hotwords_support": True  # 新增热词支持标志
             },
             "configuration": {
                 "audio_chunk_duration_ms": AppConfig.AUDIO_CHUNK_DURATION_MS,
                 "vad_smoothing_window": AppConfig.VAD_SMOOTHING_WINDOW,
                 "temporary_transcription_interval": AppConfig.TEMPORARY_TRANSCRIPTION_INTERVAL,
-                "max_segment_duration": AppConfig.MAX_SEGMENT_DURATION
+                "default_max_segment_duration": AppConfig.MAX_SEGMENT_DURATION
             }
         })
         
@@ -696,12 +779,11 @@ async def websocket_audio(websocket: WebSocket):
                 
                 # 接收数据（带超时）
                 try:
-                    # 正确处理WebSocket接收的数据格式
                     message = await asyncio.wait_for(websocket.receive(), timeout=5.0)
                     manager.last_activity = time.time()
                     
-                    # 记录收到的消息类型
-                    if 'type' in message and message['type'] == 'websocket.disconnect':
+                    # 处理断开连接
+                    if message.get('type') == 'websocket.disconnect':
                         logger.info(f"🔌 客户端主动断开连接，代码: {message.get('code', 'unknown')}")
                         break
                     
@@ -723,25 +805,17 @@ async def websocket_audio(websocket: WebSocket):
                     audio_data = message['bytes']
                     logger.debug(f"🎧 收到音频数据: {len(audio_data)} 字节，客户端: {client_id}")
                     
-                    # 验证音频数据
                     if len(audio_data) == 0:
                         logger.warning(f"⚠️ 空音频数据，客户端: {client_id}")
                         continue
                     
-                    # 检查音频数据大小
+                    # 验证音频数据大小
                     expected_size = AppConfig.AUDIO_CHUNK_SIZE
                     if len(audio_data) != expected_size:
                         logger.warning(f"⚠️ 音频数据大小不匹配，预期: {expected_size}, 实际: {len(audio_data)}，客户端: {client_id}")
                         
-                        # 尝试重新同步或处理不匹配的数据
-                        if len(audio_data) < expected_size:
-                            # 填充小数据
-                            logger.info(f"🔧 填充小音频数据: {len(audio_data)} -> {expected_size} 字节")
-                            padded_data = bytearray(audio_data)
-                            padded_data.extend(b'\x00' * (expected_size - len(audio_data)))
-                            audio_data = bytes(padded_data)
-                        elif len(audio_data) > expected_size:
-                            # 处理大数据 - 可能是多个片段
+                        # 处理大数据块
+                        if len(audio_data) > expected_size:
                             logger.info(f"🔧 处理大数据块: {len(audio_data)} 字节，可能包含 {len(audio_data) // expected_size + 1} 个片段")
                             
                             # 处理完整的片段
@@ -751,11 +825,17 @@ async def websocket_audio(websocket: WebSocket):
                                     await manager.process_audio_chunk(chunk, debug_audio)
                                     log_audio_metrics(chunk, manager.last_chunk_id, client_id)
                             
-                            # 剩余数据不足一个片段
+                            # 剩余数据
                             remaining = len(audio_data) % expected_size
                             if remaining > 0:
                                 logger.info(f"🔧 剩余 {remaining} 字节，等待下一批数据完成片段")
                             continue
+                        # 处理小数据块 - 填充
+                        elif len(audio_data) < expected_size:
+                            logger.info(f"🔧 填充小音频数据: {len(audio_data)} -> {expected_size} 字节")
+                            padded_data = bytearray(audio_data)
+                            padded_data.extend(b'\x00' * (expected_size - len(audio_data)))
+                            audio_data = bytes(padded_data)
                     
                     # 处理单个音频片段
                     await manager.process_audio_chunk(audio_data, debug_audio)
@@ -764,7 +844,6 @@ async def websocket_audio(websocket: WebSocket):
                 # 处理文本控制消息
                 elif 'text' in message and message['text'] is not None:
                     try:
-                        # 正确解析文本消息
                         text_data = message['text']
                         msg_data = json.loads(text_data)
                         msg_type = msg_data.get('type', 'unknown')
@@ -803,7 +882,6 @@ async def websocket_audio(websocket: WebSocket):
                         elif msg_type == 'vad_config':
                             config = msg_data.get('config', {})
                             logger.info(f"🔧 收到 VAD 配置更新请求: {config}, 客户端: {client_id}")
-                            # 转发到VAD配置端点
                             vad_config = VADConfig(**config)
                             response = await update_vad_config(vad_config)
                             await manager.send_json({
@@ -813,6 +891,31 @@ async def websocket_audio(websocket: WebSocket):
                                 "config": config
                             })
                             
+                        # 新增热词配置消息
+                        elif msg_type == 'hotwords_config':
+                            hotwords = msg_data.get('hotwords', [])
+                            logger.info(f"🔥 收到热词配置更新: {hotwords}, 客户端: {client_id}")
+                            
+                            # 验证热词格式
+                            if not isinstance(hotwords, list) or not all(isinstance(hw, str) for hw in hotwords):
+                                await manager.send_json({
+                                    "type": "error",
+                                    "code": 400,
+                                    "message": "无效的热词格式，应为字符串列表",
+                                    "client_id": client_id
+                                })
+                                continue
+                            
+                            # 应用热词配置 - 通过管理器传递
+                            manager.hotwords = hotwords[:10]  # 限制数量
+                            await manager.send_json({
+                                "type": "hotwords_updated",
+                                "timestamp": time.time(),
+                                "client_id": client_id,
+                                "hotwords": manager.hotwords,
+                                "message": f"已更新 {len(manager.hotwords)} 个热词"
+                            })
+                        
                         else:
                             logger.warning(f"❓ 未知消息类型: {msg_type}, 客户端: {client_id}")
                             await manager.send_json({
@@ -838,7 +941,6 @@ async def websocket_audio(websocket: WebSocket):
                             "client_id": client_id
                         })
                 else:
-                    # 记录未知消息格式
                     logger.debug(f"🔍 未知消息格式，客户端: {client_id}, 消息: {message}")
             
             except WebSocketDisconnect as e:
@@ -886,6 +988,7 @@ if __name__ == "__main__":
     logger.info(f"  - 临时转录: 每{AppConfig.TEMPORARY_TRANSCRIPTION_INTERVAL}片段(1秒)")
     logger.info(f"  - 最大缓冲区: {AppConfig.MAX_AUDIO_BUFFER_SECONDS}秒")
     logger.info(f"  - 设备: {AppConfig.DEVICE}")
+    logger.info(f"  - 默认最大段时长: {AppConfig.MAX_SEGMENT_DURATION}秒")
     logger.info(f"🔍 调试音频: {'启用' if AppConfig.DEBUG_AUDIO_ENABLED else '禁用'}")
     logger.info("🛡️ CORS 配置: 允许所有来源")
     
