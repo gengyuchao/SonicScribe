@@ -22,7 +22,14 @@ except ImportError:
     warnings.warn("bitsandbytes not installed. INT8 mode will not be available. Install with: pip install bitsandbytes")
 
 class ASRModel:
-    def __init__(self, checkpoint_dir: str, device: str = "cuda", mode: str = "native"):
+    def __init__(
+        self, 
+        checkpoint_dir: str, 
+        device: str = "cuda", 
+        mode: str = "native",
+        cpu_threads: Optional[int] = None,
+        cpu_interop_threads: Optional[int] = None
+    ):
         """
         初始化 ASR 模型，支持原生模式和 INT8 量化模式。
         
@@ -32,6 +39,8 @@ class ASRModel:
             mode: 运行模式，可选 "native" (原生 bfloat16) 或 "int8" (8-bit 量化)
                 - "native": 使用 torch.bfloat16，精度高，显存占用大
                 - "int8": 使用 8-bit 量化，显存占用小，适合 GTX1060 等小显存显卡
+            cpu_threads: CPU推理时使用的线程数，None表示使用所有可用核心
+            cpu_interop_threads: CPU内部操作线程数，通常设置为1
         """
         # 验证模式
         if mode not in ["native", "int8"]:
@@ -43,6 +52,10 @@ class ASRModel:
         # 确定设备
         self.device = torch.device(device if torch.cuda.is_available() else "cpu")
         self.mode = mode
+        
+        # 设置CPU多线程（必须在加载模型前设置）
+        if self.device.type == "cpu":
+            self._setup_cpu_threads(cpu_threads, cpu_interop_threads)
         
         # 设置模型数据类型
         self.model_dtype = torch.bfloat16 if mode == "native" else torch.float16
@@ -72,6 +85,37 @@ class ASRModel:
         
         # 打印模型信息
         self._print_model_info()
+
+    def _setup_cpu_threads(self, cpu_threads: Optional[int], cpu_interop_threads: Optional[int]):
+        """设置CPU多线程配置"""
+        # 设置计算线程数
+        if cpu_threads is not None:
+            torch.set_num_threads(cpu_threads)
+            print(f"🔧 设置CPU计算线程数: {cpu_threads}")
+        else:
+            # 自动检测CPU核心数
+            import multiprocessing
+            cpu_count = multiprocessing.cpu_count()
+            # 通常使用所有核心，但可以留一些给系统
+            recommended_threads = max(1, cpu_count - 2) if cpu_count > 4 else cpu_count
+            torch.set_num_threads(recommended_threads)
+            print(f"🔧 自动设置CPU计算线程数: {recommended_threads} (总核心: {cpu_count})")
+        
+        # 设置内部操作线程数（通常设置为1以获得最佳性能）
+        if cpu_interop_threads is not None:
+            torch.set_num_interop_threads(cpu_interop_threads)
+            print(f"🔧 设置CPU内部操作线程数: {cpu_interop_threads}")
+        else:
+            torch.set_num_interop_threads(1)
+            print("🔧 设置CPU内部操作线程数: 1 (推荐)")
+        
+        # 设置OpenMP和MKL环境变量（如果可用）
+        if cpu_threads is not None:
+            os.environ["OMP_NUM_THREADS"] = str(cpu_threads)
+            os.environ["MKL_NUM_THREADS"] = str(cpu_threads)
+        
+        # 打印当前线程配置
+        print(f"📊 CPU线程配置: 计算线程={torch.get_num_threads()}, 内部操作线程={torch.get_num_interop_threads()}")
 
     def _load_model_standard(self, mode: str):
         """标准方式加载模型（原生模式或非GLM-ASR的INT8模式）"""
@@ -172,6 +216,8 @@ class ASRModel:
             allocated = torch.cuda.memory_allocated() / 1024**2
             reserved = torch.cuda.memory_reserved() / 1024**2
             print(f"📊 GPU 显存使用: 已分配 {allocated:.1f}MB | 已保留 {reserved:.1f}MB")
+        else:
+            print(f"📊 CPU 线程配置: 计算线程={torch.get_num_threads()}, 内部操作线程={torch.get_num_interop_threads()}")
         
         # 打印模型参数数量
         total_params = sum(p.numel() for p in self.model.parameters())
@@ -318,6 +364,9 @@ class ASRModel:
                 start_time = torch.cuda.Event(enable_timing=True)
                 end_time = torch.cuda.Event(enable_timing=True)
                 start_time.record()
+            else:
+                import time
+                start_time_cpu = time.time()
             
             # 1. 预处理音频并获取临时文件路径
             temp_audio_path = self._prepare_audio_tempfile(audio_tensor, sampling_rate)
@@ -385,6 +434,9 @@ class ASRModel:
                 end_time.record()
                 torch.cuda.synchronize()
                 elapsed_time = start_time.elapsed_time(end_time) / 1000.0  # 转换为秒
+            else:
+                end_time_cpu = time.time()
+                elapsed_time = end_time_cpu - start_time_cpu
 
             # 9. 清理缓存
             if self.device.type == "cuda":
@@ -403,6 +455,11 @@ class ASRModel:
                     debug_info.update({
                         "gpu_memory_allocated_mb": torch.cuda.memory_allocated() / 1024**2,
                         "gpu_memory_reserved_mb": torch.cuda.memory_reserved() / 1024**2,
+                    })
+                else:
+                    debug_info.update({
+                        "cpu_threads": torch.get_num_threads(),
+                        "cpu_interop_threads": torch.get_num_interop_threads(),
                     })
                 
                 return debug_info
@@ -447,6 +504,11 @@ class ASRModel:
                 "gpu_name": torch.cuda.get_device_name(),
                 "gpu_memory_total_mb": torch.cuda.get_device_properties(0).total_memory / 1024**2,
             })
+        else:
+            info.update({
+                "cpu_threads": torch.get_num_threads(),
+                "cpu_interop_threads": torch.get_num_interop_threads(),
+            })
         
         return info
 
@@ -486,7 +548,9 @@ if __name__ == "__main__":
         asr_cpu = ASRModel(
             checkpoint_dir="./glm-asr-model",
             device="cpu",
-            mode="native"  # CPU 不支持 INT8
+            mode="native",  # CPU 不支持 INT8
+            cpu_threads=4,  # 使用4个CPU线程
+            cpu_interop_threads=1  # 内部操作使用1个线程（推荐）
         )
         print("✅ CPU 模式模型初始化成功")
         print(f"模型信息: {asr_cpu.get_model_info()}")
